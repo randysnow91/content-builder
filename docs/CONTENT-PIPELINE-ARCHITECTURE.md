@@ -1,9 +1,9 @@
 # Content Pipeline Architecture — Daily & Weekly Newsletter Automation
 
-**Status:** Design document — **finalized, including the Reviewer's RAG
-approach (2026-09-15).** Not yet a build spec (no milestones or acceptance
-criteria); to be turned into an `R2_BUILD-SPEC.md` when build starts, using
-§18's stages as the milestone list.
+**Status:** Design document — **finalized.** Build has started: EmailServer
+and Content Builder each now have their **own** `R2_BUILD-SPEC.md` (§16.5),
+derived from §18's stages. This document stays the cross-repo picture; it is
+not itself a build spec.
 
 **Covers:** SRD R2 (Content Builder app, Conductor/orchestrator, scheduled
 sends) and the R3 weekly-email + subscription-preference work, which the
@@ -18,6 +18,7 @@ exists and is deployed.
 | v0.1 | 2026-09-08 | Initial architecture from the design discussion. |
 | v0.2 | 2026-09-10 | Finalized: all v0.1 open questions decided (§15). Added §16 (repository & infrastructure layout — 3 repos, 1 Supabase, 3 Render services) and §17 (running Claude Code per repo). Daily `send_after` pinned to 10:00 AM. |
 | v0.3 | 2026-09-15 | Designed the Reviewer agent's three checks and its RAG system (§11): link validity and summary-accuracy are *not* RAG (mechanical / grounded-in-one-document), the PM-Perspective-vs-practices check *is* — a seed corpus in Content Builder's own `pgvector` Supabase project (a scoped exception to §16.2), growing later from a per-article `mailto:` feedback link. Added §18 (recommended build order — 5 stages, RAG lands at stage 3) and the R1-vs-R2 naming rationale in §19. |
+| v0.4 | 2026-09-15 | **Reversed course on build specs.** The first `R2_BUILD-SPEC.md` was written as one document spanning all three repos' milestones (per this doc's own earlier §19 instruction) and, in practice, caused real confusion — a ContentBuilder session got handed EmailServer's and Conductor's work too, with no tooling keeping copies in sync. §16.5 and §19 now say build specs are **per repo**; this doc keeps owning only the cross-repo picture. EmailServer's and Content Builder's specs were split out accordingly. |
 
 ---
 
@@ -557,13 +558,32 @@ This is the only thing that spans repos, so pin it:
   annoying: publish it as a tiny npm package, or `GET /api/schema/issue` from
   EmailServer. Start hand-kept.
 
-### 16.5 Docs
+### 16.5 Docs — one architecture doc, but a build spec per repo
 
-The canonical design docs (`CONTENT-PIPELINE-ARCHITECTURE.md`, the future
-`R2_BUILD-SPEC.md`) stay in **EmailServer's repo** — the anchor. Each new
-repo's `README` links back to them, and a copy of the relevant doc + the
-`issue-schema.ts` contract is placed in each new repo when it's scaffolded
-(§17).
+**This architecture doc** (`CONTENT-PIPELINE-ARCHITECTURE.md`) is the one
+thing that genuinely needs a single home — it's the cross-repo picture and
+the sequencing (§18). It stays canonical in **EmailServer's repo** (the
+anchor) and a copy travels into each new repo when it's scaffolded (§17),
+kept in sync by hand.
+
+**Build specs are per repo, not shared** (revised from an earlier version of
+this doc — see the v0.4 changelog entry for why). Each repo gets its **own**
+`R2_BUILD-SPEC.md`, scoped only to *that repo's* milestones, written and
+worked on entirely from within that repo:
+
+- `EmailServer/docs/R2_BUILD-SPEC.md` — the Issue/Template data model, the
+  ingestion endpoint, the admin UI extension.
+- `ContentBuilder/docs/R2_BUILD-SPEC.md` — the four agents, `/generate`, the
+  Reviewer's checks and RAG corpus, the feedback link, weekly synthesis.
+- `Conductor/docs/R2_BUILD-SPEC.md` — written when that repo is scaffolded.
+
+A cross-repo dependency (e.g. "Content Builder's full end-to-end test needs
+EmailServer's ingestion endpoint") is a **short pointer back to this
+architecture doc**, not a milestone owned by the repo that isn't doing the
+work. This avoids two problems a single shared spec caused in practice: it
+handed each repo's session a bigger, more sprawling document than what that
+session was actually there to build, and nothing enforced the copies staying
+in sync if one got hand-edited.
 
 ---
 
@@ -582,9 +602,10 @@ repo's `README` links back to them, and a copy of the relevant doc + the
 is scaffolded, make the context travel with the repo:**
 
 1. Copy `issue-schema.ts` (the §16.4 contract) into the repo.
-2. Copy `CONTENT-PIPELINE-ARCHITECTURE.md` (and the future `R2_BUILD-SPEC.md`)
-   into the repo's `docs/`.
-3. Seed the repo's Claude memory at the start of the first session (operator
+2. Copy `CONTENT-PIPELINE-ARCHITECTURE.md` into the repo's `docs/`.
+3. Write **that repo's own** `R2_BUILD-SPEC.md` there — scoped to its own
+   milestones only (§16.5), not a copy of a shared one.
+4. Seed the repo's Claude memory at the start of the first session (operator
    profile, build workflow, a pointer to the architecture). A fresh memory
    namespace for a fresh project is correct.
 
@@ -637,10 +658,10 @@ EmailServer's M0–M7. This sequencing becomes the milestone list in
   exist to deliver R2 of the *same product* — so they inherit the R2 label
   rather than each starting their own "V1." One release ladder for the whole
   system means no translation needed when any repo's docs say "R2."
-- Next step when build starts: turn this into `docs/R2_BUILD-SPEC.md` with
-  milestones and acceptance criteria (§18's stages are the milestones), the
-  same way `V1_BUILD-SPEC.md` was derived from the SRD. Canonical in
-  EmailServer's repo (§16.5); copied into `content-builder/` and `conductor/`
-  when each is scaffolded.
+- **Build specs are per repo** (§16.5) — `R2_BUILD-SPEC.md` in each of
+  `EmailServer/`, `ContentBuilder/`, and (when scaffolded) `Conductor/`,
+  each scoped to that repo's own milestones, derived from §18's stages and
+  this doc, the same way `V1_BUILD-SPEC.md` was derived from the SRD. Not
+  one shared document — see §16.5 for why.
 
-*End of Content Pipeline Architecture v0.3 — design finalized, RAG approach settled.*
+*End of Content Pipeline Architecture v0.4 — design finalized; build specs live per repo.*
