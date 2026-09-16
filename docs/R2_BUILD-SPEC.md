@@ -1,6 +1,7 @@
 # Claude Code Build Spec — Content Builder (R2)
 
-**Status:** v1.1 — M0 and M1 complete (2026-09-16), M2 next.
+**Status:** v1.2 — M0 and M1 complete; M2 code complete and mostly verified,
+one live confirmation left (2026-09-16).
 **Derived from:** `CONTENT-PIPELINE-ARCHITECTURE.md` (the cross-repo design —
 read it first, especially §6, §11) + planning discussion (2026-09-15).
 **Scope:** Content Builder's own R2 work only. EmailServer and Conductor each
@@ -13,6 +14,7 @@ note below).
 |---------|------|---------|
 | v1.0 | 2026-09-15 | Replaces the original cross-repo `R2_BUILD-SPEC.md`, which bundled EmailServer's and Conductor's milestones in here too. That followed an instruction in an earlier version of the architecture doc (§19) that, in practice, handed this repo a bigger document than what it's actually building, with no tooling keeping the EmailServer copy in sync. This version is scoped to Content Builder alone; M0's content and status carry over unchanged (it's already built). |
 | v1.1 | 2026-09-16 | M1 built and verified: real `POST /generate` calls, live web search, all four acceptance criteria checked off (including the zero-articles fallback, verified via a targeted synthetic-input check rather than waiting on a real search to happen to find nothing). One real bug found and fixed along the way: long research turns can end with `stop_reason: "pause_turn"` instead of finishing — `src/lib/agentTurn.ts` now loops until a terminal stop reason. Noted a follow-up in §10: the agents currently hardcode "AI news" as the subject, not just as a default — a real second, non-AI newsletter would need that generalized, not copied. |
+| v1.2 | 2026-09-16 | M2 built: the Reviewer agent (`src/agents/reviewer.ts`) runs link validity (`src/lib/linkCheck.ts`) and summary accuracy, wired as a 4th pipeline step. Deviated from the original wording (Reviewer fetches each URL itself rather than reusing "Research's already-fetched text," since Research never fetches full text — see M2's own design note). 3 of 4 acceptance criteria verified via targeted direct tests; the 4th (a full live run confirming zero flags on a clean generation) is blocked on an Anthropic-side web-search rate limit hit during testing, to finish next session. Two more real bugs found and fixed: the SDK's default timeout/retry settings could hang 10+ minutes before failing (tightened, then specifically loosened again for Research's own call once testing showed 3 minutes was too aggressive for genuine search work - see M2's known-issue note); and `extractJson()` didn't handle a model prefacing its JSON reply with explanatory prose. |
 
 > **How to use this document.** The architecture doc says *what* and *why*,
 > across all three services. This spec says *how, with what, and in what
@@ -252,29 +254,69 @@ web search — no Reviewer yet (architecture doc §18, stage 1).
 
 ---
 
-### M2: Reviewer — Mechanical Checks
+### M2: Reviewer — Mechanical Checks — 🟡 code complete, final live confirmation pending (2026-09-16)
 
 **Goals:** Link validity + summary accuracy checks run on every generation —
 no RAG yet (architecture doc §18, stage 2).
 
+**Design note (deviation from the original wording, decided 2026-09-16):**
+this spec originally said to hand the Reviewer "the Research agent's
+already-fetched article text" — but Research (M1) never fetches full text,
+only web-search snippets. Rather than retrofitting Research, **the Reviewer
+fetches each URL itself** (`src/lib/linkCheck.ts`): one fetch per article
+answers the link-validity question *and* supplies the real page text the
+accuracy check is grounded in. This is arguably more rigorous than the
+original plan (checking against an independent fetch, not against Research's
+own possibly-flawed notes).
+
 **Tasks:**
 1. Link validity check: fetch each `article_card.url`, verify it resolves to
    the actual article (not a 404, paywall redirect, or generic homepage) —
-   plain fetch + validation, no retrieval (§7.2).
-2. Summary accuracy check: hand the Research agent's already-fetched article
-   text to the Reviewer as context; ask whether the summary/PM Perspective
-   faithfully reflects it.
+   plain fetch + validation, no retrieval (§7.2). Built: `src/lib/linkCheck.ts`.
+2. Summary accuracy check: ask the Reviewer whether the summary/PM
+   Perspective faithfully reflects the fetched article text. Built:
+   `src/agents/reviewer.ts`.
 3. Reviewer agent as a fourth, separate orchestrator step; findings collected
-   into a `reviewerFlags` structure attached to the response.
+   into a `reviewerFlags` structure attached to the response. Built: added
+   to `issue-schema.ts` and wired into `generateDaily.ts`.
 
 **Acceptance Criteria:**
-- [ ] A deliberately broken URL (404) in a test run is flagged by the link
-      check.
-- [ ] A deliberately mismatched summary (edited after generation, re-run
-      through just the Reviewer) is flagged by the accuracy check.
-- [ ] A clean generation produces no flags.
+- [x] A deliberately broken URL (404) in a test run is flagged by the link
+      check — verified directly against a real 404 URL (targeted check, same
+      approach as M1's zero-articles verification, not a full live pipeline
+      run).
+- [x] A deliberately mismatched summary (edited after generation, re-run
+      through just the Reviewer) is flagged by the accuracy check —
+      verified directly: a real article's summary was replaced with a
+      false one (claimed the page was about pizza history), and the
+      Reviewer correctly flagged it with a specific explanation.
+- [x] A clean generation produces no flags — verified at the Reviewer level
+      directly (accurate summary → no flag, same targeted test as above).
+      **Not yet reconfirmed through a full live Research → Curator → Writer
+      → Reviewer run** — see the known issue below.
 - [ ] *(Once EmailServer's ingestion accepts `reviewerFlags` — not required
       here)*: a flagged Issue posted to EmailServer gets `send_after = NULL`.
+
+**Known issue found during testing, fixed:** the Anthropic SDK's default
+timeout (10 min) and its default retry-on-timeout behavior (2 retries) meant
+a slow call could silently hang far longer than expected before failing.
+Tightened first (3 min, 1 retry) — but that was too aggressive in the other
+direction: a real Research call doing genuine web searches can legitimately
+take longer than 3 minutes and was being cut off before finishing. Settled
+on a per-call override for Research specifically: 8-minute timeout, no
+retries (`src/agents/research.ts`, via `runUntilDone`'s new `requestOptions`
+parameter, `src/lib/agentTurn.ts`). Also hardened `extractJson()`
+(`src/lib/json.ts`) to handle a model prefacing its JSON answer with
+explanatory prose (seen when Research explained a search failure before
+replying `[]`) instead of only handling a ```json fence.
+
+**Open item for next session:** while testing this, Research began failing
+with "Server tool use limit exceeded" on the web_search tool - an
+Anthropic-side rate limit, almost certainly from the volume of test
+generations run today. Need one more full, real `/generate` run (once the
+limit clears) confirming a genuinely clean generation produces zero
+`reviewerFlags`, to close out the last acceptance box with real evidence
+rather than the isolated Reviewer-only test.
 
 ---
 
@@ -395,4 +437,4 @@ Same boundaries as the architecture doc §14, plus:
 
 ---
 
-*End of Build Spec v1.1 — M0 and M1 complete, M2 next.*
+*End of Build Spec v1.2 — M0 and M1 complete; M2 code complete, one live confirmation left.*

@@ -1,11 +1,25 @@
 import { runCuratorAgent } from "../agents/curator";
 import { runResearchAgent } from "../agents/research";
+import { runReviewerAgent } from "../agents/reviewer";
 import { runWriterAgent } from "../agents/writer";
 import type { NewsletterConfig, WriterOutput } from "../agents/types";
 import type { Block, IssuePayload } from "../lib/issue-schema";
 
 function todayIsoDate(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+// Wraps a pipeline stage with elapsed-time logging so a slow run can be
+// diagnosed from the logs alone - which stage was slow - rather than
+// guessed at (this is exactly what was missing when a Research call ran
+// past 10 minutes during M2 testing).
+async function timed<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  const start = Date.now();
+  try {
+    return await fn();
+  } finally {
+    console.log(`[pipeline] ${label} took ${((Date.now() - start) / 1000).toFixed(1)}s`);
+  }
 }
 
 // Pure data transform, no API calls - kept separate from the orchestration
@@ -44,22 +58,27 @@ export function buildDailyBlocks(written: WriterOutput): Block[] {
   return blocks;
 }
 
-// Wires Research -> Curator -> Writer into one daily IssuePayload
-// (docs/R2_BUILD-SPEC.md M1). Each agent is its own, separate API call -
+// Wires Research -> Curator -> Writer -> Reviewer into one daily IssuePayload
+// (docs/R2_BUILD-SPEC.md M1-M2). Each agent is its own, separate API call -
 // this function does no LLM calls of its own, just plain orchestration.
 export async function generateDailyIssue(config: NewsletterConfig): Promise<IssuePayload> {
-  const candidates = await runResearchAgent(config);
+  const candidates = await timed("Research", () => runResearchAgent(config));
   console.log(`[pipeline] Research found ${candidates.length} candidate(s)`);
 
-  const curated = await runCuratorAgent(config, candidates);
+  const curated = await timed("Curator", () => runCuratorAgent(config, candidates));
   console.log(`[pipeline] Curator kept ${curated.length} of ${candidates.length} candidate(s)`);
 
-  const written = await runWriterAgent(config, curated);
+  const written = await timed("Writer", () => runWriterAgent(config, curated));
   console.log(`[pipeline] Writer produced ${written.articles.length} article(s)`);
+
+  const reviewerFlags =
+    written.articles.length > 0 ? await timed("Reviewer", () => runReviewerAgent(written.articles)) : [];
+  console.log(`[pipeline] Reviewer raised ${reviewerFlags.length} flag(s)`);
 
   return {
     type: "daily",
     date: todayIsoDate(),
     blocks: buildDailyBlocks(written),
+    reviewerFlags,
   };
 }
