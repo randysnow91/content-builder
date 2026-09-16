@@ -1,6 +1,6 @@
 # Claude Code Build Spec — Content Builder (R2)
 
-**Status:** v1.0 — M0 complete (2026-09-15), M1 next.
+**Status:** v1.1 — M0 and M1 complete (2026-09-16), M2 next.
 **Derived from:** `CONTENT-PIPELINE-ARCHITECTURE.md` (the cross-repo design —
 read it first, especially §6, §11) + planning discussion (2026-09-15).
 **Scope:** Content Builder's own R2 work only. EmailServer and Conductor each
@@ -12,6 +12,7 @@ note below).
 | Version | Date | Summary |
 |---------|------|---------|
 | v1.0 | 2026-09-15 | Replaces the original cross-repo `R2_BUILD-SPEC.md`, which bundled EmailServer's and Conductor's milestones in here too. That followed an instruction in an earlier version of the architecture doc (§19) that, in practice, handed this repo a bigger document than what it's actually building, with no tooling keeping the EmailServer copy in sync. This version is scoped to Content Builder alone; M0's content and status carry over unchanged (it's already built). |
+| v1.1 | 2026-09-16 | M1 built and verified: real `POST /generate` calls, live web search, all four acceptance criteria checked off (including the zero-articles fallback, verified via a targeted synthetic-input check rather than waiting on a real search to happen to find nothing). One real bug found and fixed along the way: long research turns can end with `stop_reason: "pause_turn"` instead of finishing — `src/lib/agentTurn.ts` now loops until a terminal stop reason. Noted a follow-up in §10: the agents currently hardcode "AI news" as the subject, not just as a default — a real second, non-AI newsletter would need that generalized, not copied. |
 
 > **How to use this document.** The architecture doc says *what* and *why*,
 > across all three services. This spec says *how, with what, and in what
@@ -204,7 +205,7 @@ README. Kept here for the record; nothing left to do.
 
 ---
 
-### M1: Core Pipeline (Research → Curator → Writer)
+### M1: Core Pipeline (Research → Curator → Writer) — ✅ done (2026-09-16)
 
 **Goals:** `POST /generate` produces a real daily `IssuePayload` from a live
 web search — no Reviewer yet (architecture doc §18, stage 1).
@@ -229,13 +230,21 @@ web search — no Reviewer yet (architecture doc §18, stage 1).
    an empty/invalid one.
 
 **Acceptance Criteria:**
-- [ ] `POST /generate { type: "daily", newsletterConfig }` returns a valid
+- [x] `POST /generate { type: "daily", newsletterConfig }` returns a valid
       `IssuePayload` (passes `isValidIssuePayload()`) built from a live web
-      search, not fixture data.
-- [ ] Every `article_card`'s `url` is a direct article link, not a homepage.
-- [ ] A zero-articles run still returns a valid payload.
-- [ ] Each of the three agents is a separate, identifiable API call (visible
-      in logs/tracing) — not one combined prompt.
+      search, not fixture data — verified via real Postman requests.
+- [x] Every `article_card`'s `url` is a direct article link, not a homepage —
+      verified against real search results.
+- [x] A zero-articles run still returns a valid payload — verified by
+      extracting the block-building logic into `buildDailyBlocks()`
+      (pure, no API calls) and checking it against a synthetic empty
+      `WriterOutput` with `isValidIssuePayload()`, since a real live search
+      finding nothing isn't reliably reproducible on demand.
+- [x] Each of the three agents is a separate, identifiable API call (visible
+      in logs/tracing) — not one combined prompt. Verified via
+      `[pipeline]` console logs showing each agent's input/output count
+      (e.g. "Research found 3 candidate(s)" → "Curator kept 2 of 3" →
+      "Writer produced 2 article(s)").
 - [ ] *(Full end-to-end, once EmailServer's M1 exists — not required to pass
       this milestone on its own)*: manually posting the response to
       EmailServer's `POST /api/issues` produces a real, reviewable draft
@@ -373,7 +382,17 @@ Same boundaries as the architecture doc §14, plus:
 - **Weekly format** stays flexible on purpose (architecture doc §15,
   decision 6) — M5's acceptance criteria don't pin down best-of vs. trends
   vs. hybrid.
+- **The agents hardcode "AI news" as the subject**, not just as a default —
+  `topics`/`voice` steer within that premise, they don't redefine it (raised
+  2026-09-16 while discussing a hypothetical second, non-AI newsletter, e.g.
+  "Dog Rescue"). A real second-domain newsletter would need a third config
+  field (e.g. `subject`) threaded through the Research/Curator/Writer
+  prompts, generalizing the one hardcoded assumption, rather than copying
+  the agent files — the duplicate-prompts route lets bug fixes and
+  improvements silently drift out of sync between copies. Not needed for
+  M1 (one AI-focused newsletter); worth doing before a second, unrelated
+  newsletter is ever actually added.
 
 ---
 
-*End of Build Spec v1.0 — M0 complete, M1 next.*
+*End of Build Spec v1.1 — M0 and M1 complete, M2 next.*
