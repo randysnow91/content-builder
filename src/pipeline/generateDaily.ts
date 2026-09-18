@@ -2,7 +2,7 @@ import { runCuratorAgent } from "../agents/curator";
 import { runResearchAgent } from "../agents/research";
 import { runReviewerAgent } from "../agents/reviewer";
 import { runWriterAgent } from "../agents/writer";
-import type { NewsletterConfig, WriterOutput } from "../agents/types";
+import type { ArticleCandidate, NewsletterConfig, WriterOutput } from "../agents/types";
 import type { Block, IssuePayload } from "../lib/issue-schema";
 
 function todayIsoDate(): string {
@@ -62,8 +62,19 @@ export function buildDailyBlocks(written: WriterOutput): Block[] {
 // (docs/R2_BUILD-SPEC.md M1-M2). Each agent is its own, separate API call -
 // this function does no LLM calls of its own, just plain orchestration.
 export async function generateDailyIssue(config: NewsletterConfig): Promise<IssuePayload> {
-  const candidates = await timed("Research", () => runResearchAgent(config));
-  console.log(`[pipeline] Research found ${candidates.length} candidate(s)`);
+  // "Always return something, never just error out" (decided 2026-09-18):
+  // a Research failure - the 8-minute timeout, a parsing error, anything -
+  // degrades to the same "no articles found" path already built and
+  // verified for a genuinely empty search result (M1), rather than a raw
+  // 500. The failure is still logged loudly, just not fatal to the request.
+  let candidates: ArticleCandidate[];
+  try {
+    candidates = await timed("Research", () => runResearchAgent(config));
+    console.log(`[pipeline] Research found ${candidates.length} candidate(s)`);
+  } catch (err) {
+    console.error(`[pipeline] Research failed, falling back to zero candidates: ${(err as Error).message}`);
+    candidates = [];
+  }
 
   const curated = await timed("Curator", () => runCuratorAgent(config, candidates));
   console.log(`[pipeline] Curator kept ${curated.length} of ${candidates.length} candidate(s)`);

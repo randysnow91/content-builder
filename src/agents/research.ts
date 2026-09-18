@@ -27,23 +27,33 @@ export async function runResearchAgent(config: NewsletterConfig): Promise<Articl
   const response = await runUntilDone(
     {
       model: AGENT_MODEL,
-      max_tokens: 8192,
+      // Raised from 8192: with 15-20+ search results accumulating as
+      // context, the tool-use/result content itself eats into this budget
+      // before the model ever writes its final JSON answer.
+      max_tokens: 16000,
       system: SYSTEM_PROMPT,
       tools: [
         {
           type: "web_search_20260318",
           name: "web_search",
-          max_uses: 5,
+          // A hint, not a hard API-enforced ceiling in practice (confirmed
+          // 2026-09-18: real runs used 17+ successful searches regardless
+          // of this value). There's no safe way to cut a turn off mid-tool-
+          // use once it exceeds this (see agentTurn.ts's header comment for
+          // what was tried and why it was reverted) - the timeout below is
+          // the real backstop, and generateDaily.ts falls back gracefully
+          // if this whole call fails for any reason.
+          max_uses: 10,
         },
       ],
       messages: [{ role: "user", content: buildUserPrompt(config) }],
     },
     // Real web-search turns can legitimately run well past the client's
-    // default timeout (confirmed during M2 testing: a single call took
-    // over 3 minutes and was cut off before it could finish). Give this
-    // one call a much longer ceiling, and don't retry it - if it's slow
-    // because of genuine search work, retrying just doubles the wait
-    // without fixing anything.
+    // default timeout. Give this one call a much longer ceiling, and don't
+    // retry it - if it's slow because of genuine search work, retrying
+    // just doubles the wait without fixing anything. If it still doesn't
+    // converge in 8 minutes, that's a real, rare failure the pipeline
+    // catches and degrades from gracefully rather than one more retry.
     { timeout: 8 * 60 * 1000, maxRetries: 0 }
   );
 
