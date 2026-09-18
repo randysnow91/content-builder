@@ -35,7 +35,11 @@ export async function runCuratorAgent(
 
   const response = await anthropic.messages.create({
     model: AGENT_MODEL,
-    max_tokens: 2048,
+    // Raised from 2048: with Research now able to return more candidates
+    // (its own time-budgeted loop can accumulate across several search
+    // rounds), Curator's echoed-back JSON for a larger input list could get
+    // cut off mid-string before finishing.
+    max_tokens: 4096,
     system: SYSTEM_PROMPT,
     messages: [{ role: "user", content: buildUserPrompt(config, candidates) }],
   });

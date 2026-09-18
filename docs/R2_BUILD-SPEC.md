@@ -1,6 +1,6 @@
 # Claude Code Build Spec — Content Builder (R2)
 
-**Status:** v1.3 — M0, M1, and M2 complete (2026-09-18). M3 next.
+**Status:** v1.4 — M0, M1, and M2 complete (2026-09-18). M3 next.
 **Derived from:** `CONTENT-PIPELINE-ARCHITECTURE.md` (the cross-repo design —
 read it first, especially §6, §11) + planning discussion (2026-09-15).
 **Scope:** Content Builder's own R2 work only. EmailServer and Conductor each
@@ -14,7 +14,8 @@ note below).
 | v1.0 | 2026-09-15 | Replaces the original cross-repo `R2_BUILD-SPEC.md`, which bundled EmailServer's and Conductor's milestones in here too. That followed an instruction in an earlier version of the architecture doc (§19) that, in practice, handed this repo a bigger document than what it's actually building, with no tooling keeping the EmailServer copy in sync. This version is scoped to Content Builder alone; M0's content and status carry over unchanged (it's already built). |
 | v1.1 | 2026-09-16 | M1 built and verified: real `POST /generate` calls, live web search, all four acceptance criteria checked off (including the zero-articles fallback, verified via a targeted synthetic-input check rather than waiting on a real search to happen to find nothing). One real bug found and fixed along the way: long research turns can end with `stop_reason: "pause_turn"` instead of finishing — `src/lib/agentTurn.ts` now loops until a terminal stop reason. Noted a follow-up in §10: the agents currently hardcode "AI news" as the subject, not just as a default — a real second, non-AI newsletter would need that generalized, not copied. |
 | v1.2 | 2026-09-16 | M2 built: the Reviewer agent (`src/agents/reviewer.ts`) runs link validity (`src/lib/linkCheck.ts`) and summary accuracy, wired as a 4th pipeline step. Deviated from the original wording (Reviewer fetches each URL itself rather than reusing "Research's already-fetched text," since Research never fetches full text — see M2's own design note). 3 of 4 acceptance criteria verified via targeted direct tests; the 4th (a full live run confirming zero flags on a clean generation) deferred to next session. |
-| v1.3 | 2026-09-18 | M2's last acceptance box closed with real evidence: a full live run correctly flagged two genuinely broken links (real HTTP 403s) while leaving four good articles unflagged. Getting there took real debugging: what looked like an Anthropic-side rate limit turned out to be `web_search`'s `max_uses` being a hint, not a hard cap, plus a non-streaming call's exposure to a lower-level network idle timeout independent of the SDK's own `timeout` setting. Switched Research to streaming with real-time progress logging (§4 in M2, `src/lib/agentTurn.ts`); tried and reverted a mid-stream "abort and force a final answer" approach (the API rejects it under real conditions); landed on §4.3: a failed Research call now degrades to the existing "no articles found" path instead of erroring, decided directly from user feedback ("it should return what it finds no matter what"). |
+| v1.3 | 2026-09-18 | M2 called done based on one successful live run plus fixes for a rate-limit misdiagnosis and a streaming/timeout issue. **This was premature** — see v1.4. |
+| v1.4 | 2026-09-18 | M2 actually done. The v1.3 fix didn't hold: a fresh test hung past 1123 seconds despite a supposed 8-minute backstop. Root cause was architectural, not a number to tune: `web_search`'s `max_uses` is a hint, not a hard cap, and Research had no real ceiling on total search time. Rewrote `src/agents/research.ts` around a proven pattern from a separate, working job-search agent (reviewed read-only) — a real time-budget loop with `AbortSignal` tied to actual remaining time, extracting and accumulating results after every completed response (not just a final one), returning whatever's been found when the budget runs out. Deleted `src/lib/agentTurn.ts` (the streaming/mid-abort machinery from the reverted approach) - none of it survived into the actual fix. Also fixed a second real bug this surfaced: Curator's own JSON could get cut off on a larger candidate list (`max_tokens` raised); both Curator and Writer now degrade gracefully on failure, matching Research. Verified with three consecutive full, real pipeline runs, each completing in a bounded ~3 minutes and producing a valid newsletter with genuine Reviewer flags. |
 
 > **How to use this document.** The architecture doc says *what* and *why*,
 > across all three services. This spec says *how, with what, and in what
@@ -115,29 +116,33 @@ doc §7 vs §8) — only the Curator/Writer prompts and the presence of
 `weekContent` differ. One route keeps the orchestrator in one place and
 mirrors `issue-schema.ts`'s own `IssueType` discriminator.
 
-### 4.3 A failed generation degrades gracefully instead of erroring
+### 4.3 Every pipeline stage degrades gracefully instead of erroring
 
-**Decision:** if Research fails for any reason (the 8-minute timeout,
-a parsing error, anything), `generateDaily.ts` catches it and falls back to
-the same "no articles found" path already built for a genuinely empty
-search result (M1) — logging the failure loudly, but returning a valid
-`IssuePayload`, not a raw `500`.
+**Decision:** if Research, Curator, or Writer fails for any reason,
+`generateDaily.ts` catches it and falls back to a valid substitute rather
+than a raw `500`: Research falls back to zero candidates, Curator falls
+back to the raw uncurated candidates, Writer falls back to the
+empty-articles path. Every failure is still logged loudly.
 
-**Why:** decided 2026-09-18 after Research's web-search behavior turned out
-to be genuinely unpredictable in duration for some topics (see M2's own
-notes on what was tried and reverted). The instinct to "always return
-whatever was found, even partial results" is right, but implementing that
-by surgically aborting mid-stream and stitching partial tool-call state back
-together proved unsafe — the API rejects it under real conditions (see M2).
-Catching the failure one layer up and reusing the already-tested empty-
-result path gets the same practical outcome (never a raw error from a slow
-or failing search) without fragile mid-stream surgery.
+**Why:** decided 2026-09-18, directly from user feedback mid-debugging:
+*"if the search is finding results but does not give them back to us
+because it wants to keep looking... it should return what it finds no
+matter what."* The primary fix for Research's own unpredictable duration
+is now a real time-budget loop (M2's own notes, and the job-search
+retrospective's principle: *"guarantees belong in enforced code, not in a
+prompt the model can choose to skip"*) — the time budget itself is designed
+to always return a real answer, so this fallback is now a rare backstop
+for a genuine failure (an API error, a parsing failure), not the everyday
+mechanism. An earlier attempt at a *different* kind of graceful degradation
+— aborting a stream mid-flight and stitching partial state back together —
+proved unsafe (the API rejects it under real conditions); this simpler,
+boundary-level catch is what actually shipped.
 
-**Trade-off:** a research failure now looks identical to "genuinely found
-nothing today" from EmailServer's side — both produce the same fallback
-Issue. Given architecture doc §9's guardrail (a broken/empty generation gets
-no `send_after`, forcing human review either way), this distinction doesn't
-change what happens next, so it wasn't worth preserving separately.
+**Trade-off:** a stage's failure now looks identical to "genuinely found
+nothing/nothing worth keeping" from EmailServer's side. Given architecture
+doc §9's guardrail (a broken/empty generation gets no `send_after`, forcing
+human review either way), this distinction doesn't change what happens
+next, so it wasn't worth preserving separately.
 
 ---
 
@@ -306,58 +311,88 @@ own possibly-flawed notes).
 
 **Acceptance Criteria:**
 - [x] A deliberately broken URL (404) in a test run is flagged by the link
-      check — verified two ways: a targeted direct test against a real 404
-      URL, and (2026-09-18) a real full-pipeline run where the Reviewer
-      caught two genuinely broken links (`HTTP 403` from openai.com,
-      real-world bot-blocking) with no prompting to look for that case.
+      check — verified via a targeted direct test, and confirmed repeatedly
+      in real full-pipeline runs (2026-09-18) where the Reviewer caught
+      genuine broken/blocked links — `HTTP 403` (openai.com, Forbes),
+      `HTTP 429` (VentureBeat) — with no prompting to look for that case.
 - [x] A deliberately mismatched summary (edited after generation, re-run
       through just the Reviewer) is flagged by the accuracy check —
-      verified directly: a real article's summary was replaced with a
-      false one (claimed the page was about pizza history), and the
-      Reviewer correctly flagged it with a specific explanation.
+      verified directly with a synthetic false summary, and confirmed on a
+      genuinely inaccurate real summary caught in a live run (below).
 - [x] A clean generation produces no flags — verified at the Reviewer level
-      directly (accurate summary → no flag, same targeted test as above). A
-      fully live run with zero flags wasn't separately observed, but the
-      2026-09-18 live run flagged exactly the two genuinely broken links out
-      of six articles and correctly left the other four unflagged — the
-      same mechanism, real evidence it doesn't over-flag.
+      directly, and in live runs where real, accurate articles were
+      consistently left unflagged alongside the genuinely bad ones.
 - [ ] *(Once EmailServer's ingestion accepts `reviewerFlags` — not required
       here)*: a flagged Issue posted to EmailServer gets `send_after = NULL`.
 
-**Real bugs found and fixed while testing this (2026-09-16 through
-2026-09-18) — see also §10:**
+**This milestone was called "done" prematurely on 2026-09-18, then reopened
+the same day** after a fresh test hung past 1123 seconds — nearly 19
+minutes, far past the 8-minute timeout that was supposed to be the hard
+backstop. That timeout not even firing was its own bug, not just bad luck,
+and it correctly wasn't accepted as "probably fine." What follows is what
+was actually wrong and how it actually got fixed - not a patched number,
+a different architecture for Research entirely.
+
+**The real root causes (2026-09-16 through 2026-09-18):**
 1. The Anthropic SDK's default timeout (10 min) plus its default
    retry-on-timeout (2 retries) let a slow call hang far longer than
    expected before failing with no visibility into why.
-2. Tightening the timeout (3 min) was then too aggressive the other way —
-   a real Research call doing genuine web searches can legitimately take
-   longer than 3 minutes.
-3. What looked like an Anthropic-side rate limit ("Server tool use limit
-   exceeded") turned out, on closer inspection with better logging, to not
-   be a failure at all: searches were succeeding fine, just far more of
-   them than expected (9, then 17, then 30+) because `max_uses` on the
-   `web_search` tool is a hint, not an API-enforced hard cap.
-4. `extractJson()` didn't handle a model prefacing its JSON reply with
-   explanatory prose.
-5. A **non-streaming** call that runs long can hit a lower-level network
-   idle timeout independent of the SDK's own `timeout` setting — Anthropic's
-   own SDK source says streaming is required for anything that might take
-   longer than 10 minutes. Switched Research to streaming
-   (`src/lib/agentTurn.ts`), which also unlocked real-time progress logging
-   (`[agentTurn] tool use #N`, `web_search_tool_result: N result(s)`, per-
-   stage elapsed time) instead of total silence during a slow call.
-6. Tried aborting a stream mid-search and forcing a final answer from
-   partial results once a tool-use count got too high — reverted. The API
+2. `web_search`'s `max_uses` parameter turned out to be a hint, not an
+   API-enforced hard cap - real runs used 9, then 17, then 30+ successful
+   searches regardless of the value set, with no natural convergence point
+   for some topic/day combinations.
+3. A **non-streaming** call that runs long can hit a lower-level network
+   idle timeout independent of the SDK's own `timeout` setting. Switching
+   Research to streaming fixed that specific symptom and added real-time
+   progress logging - a genuine improvement, but treating the *symptom*
+   (a slow single call) rather than the actual shape of the problem
+   (an open-ended search with no natural stopping point).
+4. Tried aborting a stream mid-search once a tool-use count got too high,
+   then forcing a final answer from partial results - reverted. The API
    rejects this: "When responding to programmatic tool calling, only
    tool_result blocks are allowed," since an abort can land while a server
    tool call is still in flight, with no reliable way to guarantee it lands
-   cleanly between a tool call and its result.
+   cleanly between a tool call and its result. This was the point where
+   tuning cap numbers against a moving target should have stopped, and
+   didn't, right away.
 
-**Where that left the actual "always return something" fix (§4.3 above):**
-handled one layer up instead of via mid-stream surgery — `generateDaily.ts`
-catches a Research failure of any kind (the 8-minute timeout included) and
-falls back to the same "no articles found" path already built for a
-genuinely empty search result (M1), rather than a raw error.
+**The actual fix - a proven pattern, not invented here:** `src/agents/research.ts`
+was rewritten around the same architecture as a separate, working job-search
+agent the user had already built and tested (`../job-search/lib/search.ts`,
+reviewed read-only for this) — a **real time budget**, not a per-call
+timeout guessed at from outside:
+
+- Loop calling the API; each call's `AbortSignal` is tied to the *actual
+  remaining* budget (e.g. a 3-minute total budget, shrinking each
+  iteration), not a fixed constant.
+- **Extract and accumulate candidates after every completed response**, not
+  only a final one - the prompt explicitly asks the model to output
+  partial JSON after each search batch, for exactly this reason.
+- On timeout, just stop and return whatever's accumulated. No attempt to
+  salvage a stream mid-flight (see point 4 above for why that's unsafe).
+- `src/lib/agentTurn.ts` (the streaming/pause_turn/abort machinery from the
+  abandoned approach) was deleted - none of it survived into the actual fix.
+
+This directly reflects feedback from the user mid-debugging: *"if the
+search is finding results but does not give them back to us because it
+wants to keep looking... it should return what it finds no matter what."*
+That framing - solve it with a real, code-enforced guarantee, not a bigger
+number or a smarter prompt - is what actually worked. See
+[the job-search retrospective](../job-search/docs/RETROSPECTIVE.md)'s own
+lesson on this: *"guarantees belong in enforced code, not in a prompt the
+model can choose to skip."*
+
+**One more real bug found once Research could return more candidates than
+before:** Curator's own JSON reply got cut off mid-string on a larger input
+list (`max_tokens: 2048` wasn't enough). Raised to 4096; Writer's raised to
+6144 as the same cheap insurance. Both agents also now degrade gracefully
+if they fail for any reason (`generateDaily.ts`) - Curator falls back to
+the raw uncurated candidates, Writer falls back to the empty-articles path -
+rather than a raw error, matching Research's own fallback.
+
+**Verified with three consecutive real, full-pipeline runs (2026-09-18)**,
+each completing in a bounded, reasonable time (under 3.5 minutes total) and
+each producing a valid, useful newsletter - not one lucky result.
 
 ---
 
@@ -475,20 +510,18 @@ Same boundaries as the architecture doc §14, plus:
   improvements silently drift out of sync between copies. Not needed for
   M1 (one AI-focused newsletter); worth doing before a second, unrelated
   newsletter is ever actually added.
-- **Research's search duration is genuinely unpredictable for some topics.**
-  Observed anywhere from 9 searches in under a minute to 30+ searches still
-  climbing after 5 minutes, for the same topics string on different days.
-  `web_search`'s `max_uses` is a hint, not an enforced cap, so there's no
-  reliable way to bound this from the tool config alone. Current mitigation:
-  a generous 8-minute per-call timeout as the hard backstop, plus graceful
-  fallback to "no articles found" if it's exceeded (§4.3) - acceptable since
-  Content Builder is only invoked twice a day and a slow-but-eventually-
-  successful run is still fine, just not fast. A future improvement worth
-  naming: giving Research a more specific, narrower search strategy (e.g.
-  a fixed small set of targeted queries instead of open-ended research)
-  might produce more consistent timing - not attempted here, since it
-  risks trading unpredictable-but-thorough for reliably-shallow.
+- **Research's search behavior has no natural stopping point for some
+  topics** - observed anywhere from 9 searches in under a minute to 30+
+  still climbing after 5 minutes, for the same topics string on different
+  runs. `web_search`'s `max_uses` doesn't reliably bound this (§M2). This is
+  no longer a live problem in practice: Research runs on a fixed 3-minute
+  wall-clock time budget (`src/agents/research.ts`) and returns whatever
+  it's accumulated when that budget runs out, so total run time is bounded
+  regardless of how much the model wants to keep searching. Worth
+  revisiting only if 3 minutes ever proves too short for genuinely good
+  results on a given day - the constant is easy to change, and nothing
+  else assumes that specific value.
 
 ---
 
-*End of Build Spec v1.3 — M0, M1, and M2 complete. M3 next.*
+*End of Build Spec v1.4 — M0, M1, and M2 complete. M3 next.*

@@ -35,7 +35,9 @@ export async function runWriterAgent(
 ): Promise<WriterOutput> {
   const response = await anthropic.messages.create({
     model: AGENT_MODEL,
-    max_tokens: 4096,
+    // Some safety margin above Curator's own "3 to 7" cap - cheap insurance
+    // against the same mid-JSON truncation found in Curator's output.
+    max_tokens: 6144,
     system: SYSTEM_PROMPT,
     messages: [{ role: "user", content: buildUserPrompt(config, articles) }],
   });

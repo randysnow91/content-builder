@@ -4,11 +4,12 @@ import Anthropic from "@anthropic-ai/sdk";
 // client so every agent isn't constructing its own.
 //
 // timeout/maxRetries are set explicitly rather than trusting the SDK's
-// defaults (10 min timeout, 2 retries on timeout) - a long research turn hit
-// that combination during M2 testing and took over 10 minutes to fail. A
-// shorter timeout with fewer retries fails fast and predictably instead;
-// our own pause_turn continuation loop (agentTurn.ts) is what actually
-// handles "the model needs another round," not blind SDK-level retries.
+// defaults (10 min timeout, 2 retries on timeout) - good enough for the
+// fast, tool-free calls (Curator, Writer, Reviewer's accuracy check).
+// Research overrides both per-call with its own real time budget and an
+// AbortSignal tied to it (src/agents/research.ts) - see docs/R2_BUILD-SPEC.md
+// M2 for why a single fixed timeout wasn't the right fix for a search that
+// can legitimately run anywhere from under a minute to several minutes.
 export const anthropic = new Anthropic({
   timeout: 3 * 60 * 1000, // 3 minutes per call
   maxRetries: 1,

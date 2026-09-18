@@ -76,11 +76,35 @@ export async function generateDailyIssue(config: NewsletterConfig): Promise<Issu
     candidates = [];
   }
 
-  const curated = await timed("Curator", () => runCuratorAgent(config, candidates));
-  console.log(`[pipeline] Curator kept ${curated.length} of ${candidates.length} candidate(s)`);
+  // Same principle as Research above: a Curator hiccup (e.g. its own JSON
+  // reply getting cut off - seen 2026-09-18 once Research started returning
+  // more candidates than before) shouldn't lose everything Research found.
+  // Falling back to the raw, uncurated candidates (capped at 7, matching
+  // Curator's own normal ceiling) is a worse newsletter than a properly
+  // curated one, but a far better outcome than an error.
+  let curated: ArticleCandidate[];
+  try {
+    curated = await timed("Curator", () => runCuratorAgent(config, candidates));
+    console.log(`[pipeline] Curator kept ${curated.length} of ${candidates.length} candidate(s)`);
+  } catch (err) {
+    console.error(`[pipeline] Curator failed, falling back to uncurated candidates: ${(err as Error).message}`);
+    curated = candidates.slice(0, 7);
+  }
 
-  const written = await timed("Writer", () => runWriterAgent(config, curated));
-  console.log(`[pipeline] Writer produced ${written.articles.length} article(s)`);
+  let written: WriterOutput;
+  try {
+    written = await timed("Writer", () => runWriterAgent(config, curated));
+    console.log(`[pipeline] Writer produced ${written.articles.length} article(s)`);
+  } catch (err) {
+    console.error(`[pipeline] Writer failed, falling back to no articles: ${(err as Error).message}`);
+    written = {
+      articles: [],
+      closingThought: {
+        heading: "💡 Useful Thought for Today",
+        body: "Today's digest couldn't be generated - a good day to revisit your own product's roadmap instead.",
+      },
+    };
+  }
 
   const reviewerFlags =
     written.articles.length > 0 ? await timed("Reviewer", () => runReviewerAgent(written.articles)) : [];
