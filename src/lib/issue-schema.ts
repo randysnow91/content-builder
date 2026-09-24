@@ -42,14 +42,15 @@ export type Block = ArticleCardBlock | TextBlock | ClosingThoughtBlock;
 
 export type IssueType = "daily" | "weekly";
 
-// The Reviewer's findings (architecture doc §11.1, §11.5; R2_BUILD-SPEC.md M2).
-// "broken_link" and "inaccurate_summary" are the two mechanical checks built
-// in M2; a third type ("practice_alignment") is expected once M3 adds the
-// RAG check. Findings annotate - they never block generation or auto-fix
-// anything. EmailServer's own copy of this file doesn't have this field yet
-// (noted as a to-do there; see R2_BUILD-SPEC.md §10) since it has no
-// consumer for it until its own M1 ships the ingestion endpoint.
-export type ReviewerFlagType = "broken_link" | "inaccurate_summary";
+// The Reviewer's findings (architecture doc §11.1, §11.5; R2_BUILD-SPEC.md
+// M2/M3). "broken_link" and "inaccurate_summary" are the two mechanical
+// checks built in M2; "practice_alignment" is M3's RAG-grounded check -
+// does the PM Perspective align with the pm_practices corpus? Findings
+// annotate - they never block generation or auto-fix anything. EmailServer's
+// own copy of this file doesn't have this field yet (noted as a to-do there;
+// see R2_BUILD-SPEC.md §10) since it has no consumer for it until its own M1
+// ships the ingestion endpoint.
+export type ReviewerFlagType = "broken_link" | "inaccurate_summary" | "practice_alignment";
 
 export type ReviewerFlag = {
   type: ReviewerFlagType;
@@ -101,7 +102,7 @@ function isValidReviewerFlag(value: unknown): value is ReviewerFlag {
   const flag = value as Record<string, unknown>;
 
   return (
-    (flag.type === "broken_link" || flag.type === "inaccurate_summary") &&
+    (flag.type === "broken_link" || flag.type === "inaccurate_summary" || flag.type === "practice_alignment") &&
     isNonEmptyString(flag.articleUrl) &&
     isNonEmptyString(flag.message)
   );

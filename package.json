@@ -17,6 +17,7 @@
   "type": "commonjs",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.125.0",
+    "@supabase/supabase-js": "^2.117.1",
     "dotenv": "^17.4.2",
     "express": "^5.2.1"
   },

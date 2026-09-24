@@ -1,6 +1,6 @@
 # Claude Code Build Spec — Content Builder (R2)
 
-**Status:** v1.4 — M0, M1, and M2 complete (2026-09-18). M3 next.
+**Status:** v1.5 — M0, M1, M2, and M3 complete (2026-09-24).
 **Derived from:** `CONTENT-PIPELINE-ARCHITECTURE.md` (the cross-repo design —
 read it first, especially §6, §11) + planning discussion (2026-09-15).
 **Scope:** Content Builder's own R2 work only. EmailServer and Conductor each
@@ -16,6 +16,7 @@ note below).
 | v1.2 | 2026-09-16 | M2 built: the Reviewer agent (`src/agents/reviewer.ts`) runs link validity (`src/lib/linkCheck.ts`) and summary accuracy, wired as a 4th pipeline step. Deviated from the original wording (Reviewer fetches each URL itself rather than reusing "Research's already-fetched text," since Research never fetches full text — see M2's own design note). 3 of 4 acceptance criteria verified via targeted direct tests; the 4th (a full live run confirming zero flags on a clean generation) deferred to next session. |
 | v1.3 | 2026-09-18 | M2 called done based on one successful live run plus fixes for a rate-limit misdiagnosis and a streaming/timeout issue. **This was premature** — see v1.4. |
 | v1.4 | 2026-09-18 | M2 actually done. The v1.3 fix didn't hold: a fresh test hung past 1123 seconds despite a supposed 8-minute backstop. Root cause was architectural, not a number to tune: `web_search`'s `max_uses` is a hint, not a hard cap, and Research had no real ceiling on total search time. Rewrote `src/agents/research.ts` around a proven pattern from a separate, working job-search agent (reviewed read-only) — a real time-budget loop with `AbortSignal` tied to actual remaining time, extracting and accumulating results after every completed response (not just a final one), returning whatever's been found when the budget runs out. Deleted `src/lib/agentTurn.ts` (the streaming/mid-abort machinery from the reverted approach) - none of it survived into the actual fix. Also fixed a second real bug this surfaced: Curator's own JSON could get cut off on a larger candidate list (`max_tokens` raised); both Curator and Writer now degrade gracefully on failure, matching Research. Verified with three consecutive full, real pipeline runs, each completing in a bounded ~3 minutes and producing a valid newsletter with genuine Reviewer flags. |
+| v1.5 | 2026-09-24 | M3 built: the Reviewer's third check, real RAG (architecture doc §11.1's "the stage where 'I built a system that uses RAG' becomes true"). Embedding provider: **Voyage AI** (`voyage-3`, 1024 dimensions). Storage: a new, separate Supabase project (`pgvector` enabled, RLS enabled with no policies since only the service_role key ever calls it). Seed corpus: 17 practice documents (within the spec's 10–30 range), authored from scratch and scoped tightly to what the Reviewer actually judges - a short PM Perspective on one news article - rather than drawn from general product-strategy material, after reviewing (but deliberately not copying from) two third-party copyrighted PM frameworks the user had on hand. One real bug found and fixed: the first version embedded each article's PM Perspective with its own Voyage API call: fine in testing, but Voyage's free tier (no payment method on file) rate-limits to 3 requests/minute, and a real newsletter has 5+ articles - fixed by batching all of a run's PM Perspectives into a single embeddings call, the same pattern the seed script already used. Verified against all four acceptance criteria: a direct test confirmed retrieval returns semantically relevant (not random) practices; a deliberately hype-y PM Perspective was flagged citing the specific practice it violated while a grounded one wasn't; and a live `POST /generate` run (real web search, 6 real articles) produced two genuine `practice_alignment` flags - each citing a specific retrieved practice - alongside a real `broken_link` and a real `inaccurate_summary` catch in the same run, confirming the three checks operate independently rather than as overlapping copies of each other. |
 
 > **How to use this document.** The architecture doc says *what* and *why*,
 > across all three services. This spec says *how, with what, and in what
@@ -396,11 +397,48 @@ each producing a valid, useful newsletter - not one lucky result.
 
 ---
 
-### M3: Reviewer — the RAG Check
+### M3: Reviewer — the RAG Check — ✅ done (2026-09-24)
 
 **Goals:** The PM-Perspective-vs-practices check is real, grounded RAG
 (architecture doc §18, stage 3 — "the stage where 'I built a system that
 uses RAG' becomes true").
+
+**Design notes (decided while building):**
+- **Embedding provider:** Voyage AI, `voyage-3` (1024 dimensions) - the
+  `pm_practices.embedding` column and the `match_pm_practices` SQL function
+  are both sized to match. If the model ever changes, both need updating
+  together.
+- **Corpus content:** the seed practices were authored from scratch, not
+  copied from the two third-party PM framework documents reviewed for
+  inspiration (a Pragmatic Institute ebook, a PMI Disciplined Agile poster) -
+  both are `©`-marked marketing/course material, and most of their content
+  (pricing, channels, launch logistics) doesn't apply to judging a
+  one-paragraph PM take on a news article anyway. The 17 seed documents are
+  scoped to five categories: customer/user grounding, distinguishing signal
+  from hype, business/strategic relevance, risk/assumptions/tradeoffs, and
+  actionability for a PM reader.
+- **Retrieval mechanism:** PostgREST (Supabase's REST layer) can't do vector
+  math through plain table queries, so retrieval goes through a Postgres
+  function (`match_pm_practices`) called via `supabase-js`'s `.rpc()` -
+  the standard pattern for pgvector + Supabase.
+- **Database security:** RLS is enabled on `pm_practices` with zero
+  policies. This has no effect on Content Builder's own code (it uses the
+  service_role key, which bypasses RLS by design) but blocks the table from
+  being publicly readable/writable via the anon key, which exists in the
+  Supabase project regardless of whether anything currently uses it.
+- **Failure handling:** the practice-alignment check is wrapped in its own
+  try/catch inside `runReviewerAgent`, separate from the link/accuracy
+  checks - a Voyage or Supabase outage drops that one check (logged loudly)
+  rather than failing the whole Reviewer stage, consistent with §4.3's
+  "degrade, don't error" principle.
+- **Rate limits are a real constraint, not just a cost line item:** the
+  first version called Voyage once per article. Voyage's free tier (no
+  payment method on file) allows only 3 requests/minute, and a real
+  newsletter run has 5+ articles - this would have broken on nearly every
+  real run, not just under load. Fixed by batching all of a run's PM
+  Perspectives into one embeddings call, matching the pattern the seed
+  script (`src/scripts/seedPracticeCorpus.ts`) already used for the corpus
+  itself.
 
 **Tasks:**
 1. Choose the embedding provider (Voyage AI or OpenAI, §2) and get an API
@@ -413,16 +451,41 @@ uses RAG' becomes true").
 5. Add this as the Reviewer's third check, alongside M2's two.
 
 **Acceptance Criteria:**
-- [ ] The seed corpus is queryable — a similarity search against a sample
+- [x] The seed corpus is queryable — a similarity search against a sample
       PM Perspective returns relevant practice documents, not random ones.
-- [ ] The Reviewer's alignment judgment is visibly grounded in retrieved
+      Verified directly: a hype-y test phrase ("this is a massive
+      breakthrough that changes everything... adopt this immediately or get
+      left behind") retrieved the "this changes everything framing" and
+      "excitement ≠ evidence" practices as its top, most-similar matches.
+- [x] The Reviewer's alignment judgment is visibly grounded in retrieved
       documents (log or surface which ones were retrieved) — not just an
-      unsupported LLM opinion.
-- [ ] A PM Perspective that clearly violates a seeded practice (test with a
-      deliberately bad one) gets flagged; a sound one doesn't.
-- [ ] This corpus/search lives entirely in Content Builder's own Supabase
+      unsupported LLM opinion. `checkPracticeAlignment` logs each article's
+      retrieved practices and similarity scores before judging, and flag
+      messages cite the specific practice a perspective conflicts with.
+- [x] A PM Perspective that clearly violates a seeded practice (test with a
+      deliberately bad one) gets flagged; a sound one doesn't. Verified
+      directly (a hype-y perspective flagged, a grounded one with an
+      acknowledged risk and a named business implication wasn't) and
+      confirmed in a live run: two genuine `practice_alignment` flags on
+      real PM Perspectives, each citing the specific retrieved practice
+      violated (an unlabeled adoption assumption; a sweeping "direction the
+      whole market is heading" claim with no acknowledged risk), while the
+      other four real perspectives in the same run weren't flagged.
+- [x] This corpus/search lives entirely in Content Builder's own Supabase
       project — confirmed no dependency on or duplication into EmailServer's
-      database.
+      database. True by construction: a new, separate Supabase project, and
+      nothing in `src/lib/ragCorpus.ts` or `supabaseClient.ts` references
+      EmailServer's schema or database.
+
+**Verified live (2026-09-24):** a real `POST /generate` run (live web
+search, 6 real articles) produced all three Reviewer check types in a
+single response - a real `broken_link` (HTTP 403 on a bot-blocking site), a
+real `inaccurate_summary` (a summary claim not supported by the actual
+article text), and two real `practice_alignment` flags - with one article
+flagged by both the link check and the practice check independently,
+demonstrating the three techniques catch genuinely different problems
+rather than overlapping (architecture doc §11.1's whole point in
+practice).
 
 ---
 
@@ -495,8 +558,11 @@ Same boundaries as the architecture doc §14, plus:
 
 ## 10. Known Limitations & Open Questions to Revisit
 
-- **Embedding provider choice (M3)** is deliberately deferred — decide once
-  actually building the RAG check, since pricing/API shapes may have moved.
+- **Embedding provider (M3):** decided as Voyage AI (`voyage-3`, 1024
+  dimensions) once actually building the RAG check. Its free tier
+  rate-limits to 3 requests/minute without a payment method on file - not a
+  problem today (the Reviewer batches all of a run's embeddings into one
+  call), but worth knowing if the corpus or call pattern grows.
 - **Weekly format** stays flexible on purpose (architecture doc §15,
   decision 6) — M5's acceptance criteria don't pin down best-of vs. trends
   vs. hybrid.
@@ -524,4 +590,4 @@ Same boundaries as the architecture doc §14, plus:
 
 ---
 
-*End of Build Spec v1.4 — M0, M1, and M2 complete. M3 next.*
+*End of Build Spec v1.5 — M0, M1, M2, and M3 complete. M4 next.*
