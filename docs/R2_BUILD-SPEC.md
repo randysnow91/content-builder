@@ -493,9 +493,12 @@ was deployed to Render for the first time (architecture doc §13 - planned
 since the design phase, but not actually done until now), with all six env
 vars (including the three new M3 ones) added to the Render service
 directly - separate from local `.env`. A real production run surfaced the
-`max_tokens` bug documented in v1.6 above; after the fix, production runs
-produce correctly-grounded `practice_alignment` flags same as local
-testing.
+`max_tokens` bug documented in v1.6 above; after the fix, a second live
+production run (6 real articles, larger than the run that originally
+broke it) completed cleanly - confirmed via Render's own logs showing the
+practice check retrieving practices for all 6 articles with no failure,
+matching the 2 flags (`broken_link`, `inaccurate_summary`) actually present
+in the response.
 
 ---
 
