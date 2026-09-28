@@ -123,14 +123,16 @@ export async function checkPracticeAlignment(articles: WrittenArticle[]): Promis
 
   const response = await anthropic.messages.create({
     model: AGENT_MODEL,
-    max_tokens: 2048,
+    max_tokens: 4096,
     system: PRACTICE_SYSTEM_PROMPT,
     messages: [{ role: "user", content: buildPracticeUserPrompt(withPractices) }],
   });
 
   const finalText = response.content.find((block) => block.type === "text")?.text;
   if (!finalText) {
-    throw new Error("Reviewer agent (practice check) returned no text content to parse");
+    throw new Error(
+      `Reviewer agent (practice check) returned no text content to parse (stop_reason: ${response.stop_reason})`
+    );
   }
 
   const conflicting = extractJson<{ articleUrl: string; message: string }[]>(finalText);

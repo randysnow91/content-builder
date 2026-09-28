@@ -1,6 +1,6 @@
 # Claude Code Build Spec — Content Builder (R2)
 
-**Status:** v1.5 — M0, M1, M2, and M3 complete (2026-09-24).
+**Status:** v1.6 — M0, M1, M2, and M3 complete (2026-09-28).
 **Derived from:** `CONTENT-PIPELINE-ARCHITECTURE.md` (the cross-repo design —
 read it first, especially §6, §11) + planning discussion (2026-09-15).
 **Scope:** Content Builder's own R2 work only. EmailServer and Conductor each
@@ -17,6 +17,7 @@ note below).
 | v1.3 | 2026-09-18 | M2 called done based on one successful live run plus fixes for a rate-limit misdiagnosis and a streaming/timeout issue. **This was premature** — see v1.4. |
 | v1.4 | 2026-09-18 | M2 actually done. The v1.3 fix didn't hold: a fresh test hung past 1123 seconds despite a supposed 8-minute backstop. Root cause was architectural, not a number to tune: `web_search`'s `max_uses` is a hint, not a hard cap, and Research had no real ceiling on total search time. Rewrote `src/agents/research.ts` around a proven pattern from a separate, working job-search agent (reviewed read-only) — a real time-budget loop with `AbortSignal` tied to actual remaining time, extracting and accumulating results after every completed response (not just a final one), returning whatever's been found when the budget runs out. Deleted `src/lib/agentTurn.ts` (the streaming/mid-abort machinery from the reverted approach) - none of it survived into the actual fix. Also fixed a second real bug this surfaced: Curator's own JSON could get cut off on a larger candidate list (`max_tokens` raised); both Curator and Writer now degrade gracefully on failure, matching Research. Verified with three consecutive full, real pipeline runs, each completing in a bounded ~3 minutes and producing a valid newsletter with genuine Reviewer flags. |
 | v1.5 | 2026-09-24 | M3 built: the Reviewer's third check, real RAG (architecture doc §11.1's "the stage where 'I built a system that uses RAG' becomes true"). Embedding provider: **Voyage AI** (`voyage-3`, 1024 dimensions). Storage: a new, separate Supabase project (`pgvector` enabled, RLS enabled with no policies since only the service_role key ever calls it). Seed corpus: 17 practice documents (within the spec's 10–30 range), authored from scratch and scoped tightly to what the Reviewer actually judges - a short PM Perspective on one news article - rather than drawn from general product-strategy material, after reviewing (but deliberately not copying from) two third-party copyrighted PM frameworks the user had on hand. One real bug found and fixed: the first version embedded each article's PM Perspective with its own Voyage API call: fine in testing, but Voyage's free tier (no payment method on file) rate-limits to 3 requests/minute, and a real newsletter has 5+ articles - fixed by batching all of a run's PM Perspectives into a single embeddings call, the same pattern the seed script already used. Verified against all four acceptance criteria: a direct test confirmed retrieval returns semantically relevant (not random) practices; a deliberately hype-y PM Perspective was flagged citing the specific practice it violated while a grounded one wasn't; and a live `POST /generate` run (real web search, 6 real articles) produced two genuine `practice_alignment` flags - each citing a specific retrieved practice - alongside a real `broken_link` and a real `inaccurate_summary` catch in the same run, confirming the three checks operate independently rather than as overlapping copies of each other. |
+| v1.6 | 2026-09-28 | Content Builder deployed to Render for the first time (architecture doc §13 called for this; it hadn't actually happened yet - only planned). A real production test surfaced a second real M3 bug, the same class as M2's Curator/Writer issue: the practice check's `max_tokens: 2048` was enough for the 2-article local tests but too small once a real 5-article production run gave the model a genuinely large batch (each article's PM Perspective plus up to 4 retrieved practices) to judge - the model ran out of budget before emitting any text block, caught as "returned no text content to parse" rather than crashing the request (the try/catch added specifically for this check did its job). Raised to `4096`, matching Curator's own fix, and added `stop_reason` to the error message so a repeat wouldn't require re-deriving the cause from scratch. Reproduced the failure locally at the original 5-article scale before the fix, then confirmed it succeeds cleanly after - not just assumed fixed. |
 
 > **How to use this document.** The architecture doc says *what* and *why*,
 > across all three services. This spec says *how, with what, and in what
@@ -487,6 +488,15 @@ demonstrating the three techniques catch genuinely different problems
 rather than overlapping (architecture doc §11.1's whole point in
 practice).
 
+**Deployed and re-verified in production (2026-09-28):** Content Builder
+was deployed to Render for the first time (architecture doc §13 - planned
+since the design phase, but not actually done until now), with all six env
+vars (including the three new M3 ones) added to the Render service
+directly - separate from local `.env`. A real production run surfaced the
+`max_tokens` bug documented in v1.6 above; after the fix, production runs
+produce correctly-grounded `practice_alignment` flags same as local
+testing.
+
 ---
 
 ### M4: Feedback Loop (Capture Only)
@@ -590,4 +600,5 @@ Same boundaries as the architecture doc §14, plus:
 
 ---
 
-*End of Build Spec v1.5 — M0, M1, M2, and M3 complete. M4 next.*
+*End of Build Spec v1.6 — M0, M1, M2, and M3 complete, and deployed to
+Render for the first time. M4 next.*
