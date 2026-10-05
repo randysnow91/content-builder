@@ -28,7 +28,19 @@ export type ClosingThought = {
   body: string;
 };
 
+// An article Curator selected but Writer couldn't produce valid content for
+// (missing required field(s), or an index Writer never addressed at all) -
+// docs/R2_BUILD-SPEC.md's missing-URL handoff (2026-10-04): drop the one
+// article rather than fail the whole Issue, but don't lose it silently -
+// generateDaily.ts turns these into a dropped_article reviewer flag.
+export type DroppedArticle = {
+  url: string;
+  title: string;
+  reason: string;
+};
+
 export type WriterOutput = {
   articles: WrittenArticle[];
+  droppedArticles: DroppedArticle[];
   closingThought: ClosingThought;
 };

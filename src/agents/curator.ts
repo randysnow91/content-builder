@@ -7,11 +7,13 @@ const SYSTEM_PROMPT = `You are the Curator agent in an automated AI newsletter p
 You do not search the web - you only judge candidates you're given. Filter for genuine relevance, remove duplicates, and rank by importance to a PM audience.`;
 
 function buildUserPrompt(config: NewsletterConfig, candidates: ArticleCandidate[]): string {
+  const indexed = candidates.map((c, index) => ({ index, ...c }));
+
   return `Newsletter topics: ${config.topics}
 Newsletter voice: ${config.voice}
 
-Here are today's candidate articles as JSON:
-${JSON.stringify(candidates, null, 2)}
+Here are today's candidate articles as JSON, each with its index in this list:
+${JSON.stringify(indexed, null, 2)}
 
 From these:
 1. Remove anything that isn't genuinely relevant to a product manager (not just AI-adjacent - it should matter for someone building or managing a product).
@@ -19,8 +21,7 @@ From these:
 3. Rank the survivors most-important-first. The first article should be the most interesting and attention-grabbing.
 4. Keep the best 3 to 7. Fewer than 3 is fine if that's all that qualifies.
 
-Reply with ONLY a JSON array (no markdown code fences, no other text) of the chosen candidates, using the exact same shape you were given:
-[{"title": string, "source": string, "url": string, "snippet": string}]
+Reply with ONLY a JSON array of the "index" values (not the full objects) of the candidates you're keeping, ordered most-important-first - e.g. [2, 0, 4]. Don't retype title/source/url/snippet; just reference them by index.
 
 If nothing qualifies, reply with an empty array: []`;
 }
@@ -35,11 +36,9 @@ export async function runCuratorAgent(
 
   const response = await anthropic.messages.create({
     model: AGENT_MODEL,
-    // Raised from 2048: with Research now able to return more candidates
-    // (its own time-budgeted loop can accumulate across several search
-    // rounds), Curator's echoed-back JSON for a larger input list could get
-    // cut off mid-string before finishing.
-    max_tokens: 4096,
+    // A list of indices is tiny compared to re-typed article objects - no
+    // realistic truncation risk, but kept well above what's needed anyway.
+    max_tokens: 1024,
     system: SYSTEM_PROMPT,
     messages: [{ role: "user", content: buildUserPrompt(config, candidates) }],
   });
@@ -49,5 +48,29 @@ export async function runCuratorAgent(
     throw new Error("Curator agent returned no text content to parse");
   }
 
-  return extractJson<ArticleCandidate[]>(finalText);
+  const indices = extractJson<number[]>(finalText);
+
+  // Map indices back to the original candidates rather than trusting
+  // re-typed JSON from the model (the actual root cause of the missing-URL
+  // bug - docs/R2_BUILD-SPEC.md, handoff 2026-10-04): title/source/url/
+  // snippet never pass through the model at all for this stage, so they
+  // can't be dropped or mangled here. An out-of-range or duplicate index
+  // isn't a real candidate being lost - just discard it (logged) rather
+  // than fail the whole stage over it.
+  const seen = new Set<number>();
+  const kept: ArticleCandidate[] = [];
+  for (const index of indices) {
+    if (!Number.isInteger(index) || index < 0 || index >= candidates.length) {
+      console.error(`[curator] ignoring out-of-range index ${index}`);
+      continue;
+    }
+    if (seen.has(index)) {
+      console.error(`[curator] ignoring duplicate index ${index}`);
+      continue;
+    }
+    seen.add(index);
+    kept.push(candidates[index]);
+  }
+
+  return kept;
 }

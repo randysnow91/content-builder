@@ -1,6 +1,6 @@
 # Claude Code Build Spec — Content Builder (R2)
 
-**Status:** v1.6 — M0, M1, M2, and M3 complete (2026-09-28).
+**Status:** v1.7 — M0, M1, M2, and M3 complete (2026-10-05).
 **Derived from:** `CONTENT-PIPELINE-ARCHITECTURE.md` (the cross-repo design —
 read it first, especially §6, §11) + planning discussion (2026-09-15).
 **Scope:** Content Builder's own R2 work only. EmailServer and Conductor each
@@ -18,6 +18,7 @@ note below).
 | v1.4 | 2026-09-18 | M2 actually done. The v1.3 fix didn't hold: a fresh test hung past 1123 seconds despite a supposed 8-minute backstop. Root cause was architectural, not a number to tune: `web_search`'s `max_uses` is a hint, not a hard cap, and Research had no real ceiling on total search time. Rewrote `src/agents/research.ts` around a proven pattern from a separate, working job-search agent (reviewed read-only) — a real time-budget loop with `AbortSignal` tied to actual remaining time, extracting and accumulating results after every completed response (not just a final one), returning whatever's been found when the budget runs out. Deleted `src/lib/agentTurn.ts` (the streaming/mid-abort machinery from the reverted approach) - none of it survived into the actual fix. Also fixed a second real bug this surfaced: Curator's own JSON could get cut off on a larger candidate list (`max_tokens` raised); both Curator and Writer now degrade gracefully on failure, matching Research. Verified with three consecutive full, real pipeline runs, each completing in a bounded ~3 minutes and producing a valid newsletter with genuine Reviewer flags. |
 | v1.5 | 2026-09-24 | M3 built: the Reviewer's third check, real RAG (architecture doc §11.1's "the stage where 'I built a system that uses RAG' becomes true"). Embedding provider: **Voyage AI** (`voyage-3`, 1024 dimensions). Storage: a new, separate Supabase project (`pgvector` enabled, RLS enabled with no policies since only the service_role key ever calls it). Seed corpus: 17 practice documents (within the spec's 10–30 range), authored from scratch and scoped tightly to what the Reviewer actually judges - a short PM Perspective on one news article - rather than drawn from general product-strategy material, after reviewing (but deliberately not copying from) two third-party copyrighted PM frameworks the user had on hand. One real bug found and fixed: the first version embedded each article's PM Perspective with its own Voyage API call: fine in testing, but Voyage's free tier (no payment method on file) rate-limits to 3 requests/minute, and a real newsletter has 5+ articles - fixed by batching all of a run's PM Perspectives into a single embeddings call, the same pattern the seed script already used. Verified against all four acceptance criteria: a direct test confirmed retrieval returns semantically relevant (not random) practices; a deliberately hype-y PM Perspective was flagged citing the specific practice it violated while a grounded one wasn't; and a live `POST /generate` run (real web search, 6 real articles) produced two genuine `practice_alignment` flags - each citing a specific retrieved practice - alongside a real `broken_link` and a real `inaccurate_summary` catch in the same run, confirming the three checks operate independently rather than as overlapping copies of each other. |
 | v1.6 | 2026-09-28 | Content Builder deployed to Render for the first time (architecture doc §13 called for this; it hadn't actually happened yet - only planned). A real production test surfaced a second real M3 bug, the same class as M2's Curator/Writer issue: the practice check's `max_tokens: 2048` was enough for the 2-article local tests but too small once a real 5-article production run gave the model a genuinely large batch (each article's PM Perspective plus up to 4 retrieved practices) to judge - the model ran out of budget before emitting any text block, caught as "returned no text content to parse" rather than crashing the request (the try/catch added specifically for this check did its job). Raised to `4096`, matching Curator's own fix, and added `stop_reason` to the error message so a repeat wouldn't require re-deriving the cause from scratch. Reproduced the failure locally at the original 5-article scale before the fix, then confirmed it succeeds cleanly after - not just assumed fixed. |
+| v1.7 | 2026-10-05 | Retroactive M1 fix: a Conductor session's real daily runs were 500ing on `"Generation produced an invalid Issue payload"` - every `article_card` had `url: undefined`. Root cause, precisely diagnosed in a handoff doc before this session even started (`WorkingNotes/HANDOFF-2026-10-04-missing-urls.md`): Curator and Writer each asked the model to re-type `title`/`source`/`url` through their own JSON output rather than the orchestrator carrying forward data it already had, and the url silently didn't survive one of those round-trips on some runs. Fixed by removing the opportunity, not improving the prompt: Curator now returns only the ranked indices of candidates it's keeping; Writer returns only `{index, emoji, summary, pmPerspective}` per article; the orchestrator merges `title`/`source`/`url` back in from the original candidate in both cases, so those fields never pass through the model at all anymore. A curated article Writer can't produce valid content for is dropped (not silently - a new `dropped_article` reviewer flag) rather than failing the whole Issue. Reviewer also now filters out any article with no usable URL as a backstop, and `routes/generate.ts` names the specific failing field on a 500 instead of a generic message. Verified directly (5 synthetic candidates, exact title/source/url matches through both stages) and live (5 real articles, zero missing URLs, no crash). User explicitly deferred the related zero-article auto-send issue from the same handoff - out of scope until EmailServer's auto-send cron ships. |
 
 > **How to use this document.** The architecture doc says *what* and *why*,
 > across all three services. This spec says *how, with what, and in what
@@ -282,6 +283,55 @@ web search — no Reviewer yet (architecture doc §18, stage 1).
       this milestone on its own)*: manually posting the response to
       EmailServer's `POST /api/issues` produces a real, reviewable draft
       Issue.
+
+**Retroactive fix (2026-10-05) — missing article URLs, found via Conductor:**
+A fresh Conductor session hit real daily-run failures (`POST /generate`
+500ing with `"Generation produced an invalid Issue payload"`) and traced the
+cause precisely before handing it back (full handoff:
+`WorkingNotes/HANDOFF-2026-10-04-missing-urls.md`): Curator and Writer were
+each asked to *re-type* `title`/`source`/`url` through their own JSON
+output, rather than the orchestrator carrying forward data it already had.
+On some runs, `url` silently didn't survive one of those two round-trips -
+not a crash, just an absent field - and the Reviewer's link check then threw
+fetching `undefined`, producing a `broken_link` flag with no `articleUrl`,
+which correctly failed `isValidIssuePayload()` for the whole Issue.
+
+This is the same lesson M2's Research/Curator/Writer work already learned
+once (see that milestone's retro: *"guarantees belong in enforced code, not
+in a prompt the model can choose to skip"*), in a new shape. The fix removes
+the opportunity rather than hoping the model complies better:
+- **Curator** (`src/agents/curator.ts`) now returns only the **indices** of
+  the candidates it's keeping, ranked - never re-typed objects. The
+  orchestrator maps indices back to Research's own `ArticleCandidate[]`,
+  so `title`/`source`/`url`/`snippet` never pass through the model at all
+  for this stage.
+- **Writer** (`src/agents/writer.ts`) now returns only what it's actually
+  generating per article (`index`, `emoji`, `summary`, `pmPerspective`);
+  `title`/`source`/`url` are merged back in from the curated candidate at
+  that index. An index Writer can't account for (out of range, missing a
+  required field, or never addressed at all) is dropped rather than passed
+  through half-formed - but not silently: it's returned as a
+  `droppedArticles` entry, which `generateDaily.ts` turns into a new
+  `dropped_article` reviewer flag (`issue-schema.ts`) so the operator sees
+  exactly which article went missing and why, and the Issue can't auto-send.
+- **Reviewer** (`src/agents/reviewer.ts`) now filters out any article with
+  no usable URL before the link/accuracy checks run, as a backstop - after
+  the above, this should be unreachable, but it's cheap insurance against
+  ever producing an invalid flag again.
+- **`routes/generate.ts`** now names the specific failing field in a 500
+  response (e.g. which block or flag was invalid and why) instead of just
+  "invalid Issue payload" - a Content-Builder-local diagnostic, deliberately
+  kept out of the shared `issue-schema.ts` contract.
+
+Verified two ways: a direct test confirmed all 5 synthetic candidates'
+`title`/`source`/`url` survived both the Curator and Writer stages as exact
+matches (now true by construction, not by luck), and a live `POST /generate`
+run (5 real articles) produced valid URLs on every card with no crash.
+
+**Explicitly deferred, not fixed here (per user, 2026-10-05):** the
+zero-article Issue auto-send-eligibility issue noted in the same handoff
+(Conductor spec §10) - scoped as needed before EmailServer's auto-send cron
+ships, not before.
 
 ---
 
@@ -603,5 +653,6 @@ Same boundaries as the architecture doc §14, plus:
 
 ---
 
-*End of Build Spec v1.6 — M0, M1, M2, and M3 complete, and deployed to
-Render for the first time. M4 next.*
+*End of Build Spec v1.7 — M0, M1, M2, and M3 complete, deployed to Render,
+and a real Conductor-surfaced bug (missing article URLs) fixed at its root
+cause. M4 next.*

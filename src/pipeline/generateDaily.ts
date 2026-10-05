@@ -3,7 +3,7 @@ import { runResearchAgent } from "../agents/research";
 import { runReviewerAgent } from "../agents/reviewer";
 import { runWriterAgent } from "../agents/writer";
 import type { ArticleCandidate, NewsletterConfig, WriterOutput } from "../agents/types";
-import type { Block, IssuePayload } from "../lib/issue-schema";
+import type { Block, IssuePayload, ReviewerFlag } from "../lib/issue-schema";
 
 function todayIsoDate(): string {
   return new Date().toISOString().slice(0, 10);
@@ -94,11 +94,14 @@ export async function generateDailyIssue(config: NewsletterConfig): Promise<Issu
   let written: WriterOutput;
   try {
     written = await timed("Writer", () => runWriterAgent(config, curated));
-    console.log(`[pipeline] Writer produced ${written.articles.length} article(s)`);
+    console.log(
+      `[pipeline] Writer produced ${written.articles.length} article(s), dropped ${written.droppedArticles.length}`
+    );
   } catch (err) {
     console.error(`[pipeline] Writer failed, falling back to no articles: ${(err as Error).message}`);
     written = {
       articles: [],
+      droppedArticles: [],
       closingThought: {
         heading: "💡 Useful Thought for Today",
         body: "Today's digest couldn't be generated - a good day to revisit your own product's roadmap instead.",
@@ -106,8 +109,19 @@ export async function generateDailyIssue(config: NewsletterConfig): Promise<Issu
     };
   }
 
+  // A curated article Writer couldn't produce valid content for (missing-URL
+  // handoff, 2026-10-04) is dropped rather than let through half-formed, but
+  // surfaced here so the operator sees it and it blocks auto-send, same as
+  // any other Reviewer finding (architecture doc §11.5).
+  const droppedFlags: ReviewerFlag[] = written.droppedArticles.map((dropped) => ({
+    type: "dropped_article",
+    articleUrl: dropped.url,
+    message: `"${dropped.title}" was selected but couldn't be fully written: ${dropped.reason}`,
+  }));
+
   const reviewerFlags =
     written.articles.length > 0 ? await timed("Reviewer", () => runReviewerAgent(written.articles)) : [];
+  reviewerFlags.push(...droppedFlags);
   console.log(`[pipeline] Reviewer raised ${reviewerFlags.length} flag(s)`);
 
   return {

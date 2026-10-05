@@ -150,8 +150,20 @@ export async function checkPracticeAlignment(articles: WrittenArticle[]): Promis
 // try/catch - a Voyage/Supabase hiccup should drop that one check, not fail
 // the whole Reviewer stage (docs/R2_BUILD-SPEC.md §4.3's "degrade, don't
 // error" principle, applied to the newest and most network-dependent check).
-export async function runReviewerAgent(articles: WrittenArticle[]): Promise<ReviewerFlag[]> {
+export async function runReviewerAgent(allArticles: WrittenArticle[]): Promise<ReviewerFlag[]> {
   const flags: ReviewerFlag[] = [];
+
+  // Writer is now expected to guarantee a real, non-empty url on every
+  // article it returns (missing-URL handoff, 2026-10-04) - this is a
+  // defensive backstop, not the real fix. checkArticleLink(undefined) would
+  // throw before producing a usable reason, and a flag with no articleUrl
+  // fails isValidIssuePayload and takes down the whole Issue - so skip
+  // rather than risk either.
+  const articles = allArticles.filter((article) => typeof article.url === "string" && article.url.trim().length > 0);
+  if (articles.length < allArticles.length) {
+    console.error(`[reviewer] ${allArticles.length - articles.length} article(s) had no url - skipped by the Reviewer`);
+  }
+
   const linkResults = await Promise.all(articles.map((article) => checkArticleLink(article.url)));
 
   const articlesToCheck: ArticleForAccuracyCheck[] = [];

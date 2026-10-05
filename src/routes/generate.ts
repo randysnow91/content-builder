@@ -1,7 +1,44 @@
 import { Router } from "express";
 import { generateDailyIssue } from "../pipeline/generateDaily";
-import { isValidIssuePayload } from "../lib/issue-schema";
+import { isValidIssuePayload, type IssuePayload } from "../lib/issue-schema";
 import type { NewsletterConfig } from "../agents/types";
+
+// Content-Builder-local diagnostics only - deliberately not part of
+// issue-schema.ts (the hand-synced EmailServer contract, docs/
+// R2_BUILD-SPEC.md §16.4), so this can name specifics without touching that
+// shared file. Named here because this is the exact failure class from the
+// missing-URL handoff (2026-10-04): isValidIssuePayload correctly says
+// "invalid" but gives no hint which field, forcing a log dig every time.
+function describeInvalidIssue(issue: IssuePayload): string {
+  const problems: string[] = [];
+
+  if (!issue.rawHtml) {
+    if (!Array.isArray(issue.blocks) || issue.blocks.length === 0) {
+      problems.push("blocks is empty or missing");
+    } else {
+      issue.blocks.forEach((block, i) => {
+        if (block.kind === "article_card") {
+          const required = ["emoji", "title", "source", "summary", "pmPerspective", "url"] as const;
+          const missing = required.filter((field) => !isNonEmptyString(block[field]));
+          if (missing.length > 0) {
+            problems.push(`blocks[${i}] (article_card "${block.title ?? "?"}") missing: ${missing.join(", ")}`);
+          }
+        } else if (block.kind === "closing_thought" && (!isNonEmptyString(block.heading) || !isNonEmptyString(block.body))) {
+          problems.push(`blocks[${i}] (closing_thought) missing heading or body`);
+        } else if (block.kind === "text" && !isNonEmptyString(block.body)) {
+          problems.push(`blocks[${i}] (text) missing body`);
+        }
+      });
+    }
+  }
+
+  (issue.reviewerFlags ?? []).forEach((flag, i) => {
+    if (!isNonEmptyString(flag.articleUrl)) problems.push(`reviewerFlags[${i}] has an empty articleUrl`);
+    if (!isNonEmptyString(flag.message)) problems.push(`reviewerFlags[${i}] has an empty message`);
+  });
+
+  return problems.length > 0 ? problems.join("; ") : "no specific field identified - see the full payload in logs";
+}
 
 export const generateRouter = Router();
 
@@ -40,8 +77,9 @@ generateRouter.post("/generate", async (req, res) => {
     const issue = await generateDailyIssue(newsletterConfig);
 
     if (!isValidIssuePayload(issue)) {
-      console.error("generateDailyIssue produced an invalid IssuePayload:", issue);
-      res.status(500).json({ error: "Generation produced an invalid Issue payload" });
+      const reason = describeInvalidIssue(issue as IssuePayload);
+      console.error(`generateDailyIssue produced an invalid IssuePayload (${reason}):`, issue);
+      res.status(500).json({ error: `Generation produced an invalid Issue payload: ${reason}` });
       return;
     }
 
