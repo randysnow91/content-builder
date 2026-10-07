@@ -1,6 +1,6 @@
 import { anthropic } from "../lib/anthropicClient";
 import { AGENT_MODEL } from "../lib/config";
-import { extractJson } from "../lib/json";
+import { extractJsonFromResponse } from "../lib/json";
 import type { ArticleCandidate, DroppedArticle, NewsletterConfig, WriterOutput, WrittenArticle } from "./types";
 
 const SYSTEM_PROMPT = `You are the Writer agent in an automated AI newsletter pipeline for product managers.
@@ -60,12 +60,7 @@ export async function runWriterAgent(
     messages: [{ role: "user", content: buildUserPrompt(config, articles) }],
   });
 
-  const finalText = response.content.find((block) => block.type === "text")?.text;
-  if (!finalText) {
-    throw new Error("Writer agent returned no text content to parse");
-  }
-
-  const raw = extractJson<RawWriterOutput>(finalText);
+  const raw = extractJsonFromResponse<RawWriterOutput>(response, "Writer agent");
 
   // Merge title/source/url back in from the curated candidate the model was
   // given, rather than trusting a re-typed copy from the model (the actual

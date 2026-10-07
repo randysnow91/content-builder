@@ -1,7 +1,7 @@
 import { anthropic } from "../lib/anthropicClient";
 import { AGENT_MODEL } from "../lib/config";
 import { embedTexts } from "../lib/embeddings";
-import { extractJson } from "../lib/json";
+import { extractJsonFromResponse } from "../lib/json";
 import { checkArticleLink } from "../lib/linkCheck";
 import { retrieveRelevantPractices } from "../lib/ragCorpus";
 import type { ReviewerFlag } from "../lib/issue-schema";
@@ -53,12 +53,10 @@ async function checkSummaryAccuracy(articles: ArticleForAccuracyCheck[]): Promis
     messages: [{ role: "user", content: buildUserPrompt(articles) }],
   });
 
-  const finalText = response.content.find((block) => block.type === "text")?.text;
-  if (!finalText) {
-    throw new Error("Reviewer agent returned no text content to parse");
-  }
-
-  const inaccurate = extractJson<{ articleUrl: string; message: string }[]>(finalText);
+  const inaccurate = extractJsonFromResponse<{ articleUrl: string; message: string }[]>(
+    response,
+    "Reviewer agent (accuracy check)"
+  );
   return inaccurate.map((flag) => ({
     type: "inaccurate_summary" as const,
     articleUrl: flag.articleUrl,
@@ -128,14 +126,10 @@ export async function checkPracticeAlignment(articles: WrittenArticle[]): Promis
     messages: [{ role: "user", content: buildPracticeUserPrompt(withPractices) }],
   });
 
-  const finalText = response.content.find((block) => block.type === "text")?.text;
-  if (!finalText) {
-    throw new Error(
-      `Reviewer agent (practice check) returned no text content to parse (stop_reason: ${response.stop_reason})`
-    );
-  }
-
-  const conflicting = extractJson<{ articleUrl: string; message: string }[]>(finalText);
+  const conflicting = extractJsonFromResponse<{ articleUrl: string; message: string }[]>(
+    response,
+    "Reviewer agent (practice check)"
+  );
   return conflicting.map((flag) => ({
     type: "practice_alignment" as const,
     articleUrl: flag.articleUrl,
@@ -183,8 +177,15 @@ export async function runReviewerAgent(allArticles: WrittenArticle[]): Promise<R
     });
   });
 
-  const accuracyFlags = await checkSummaryAccuracy(articlesToCheck);
-  flags.push(...accuracyFlags);
+  // Same "degrade, don't error" treatment as the practice check below - a
+  // malformed reply here (cut off mid-JSON, 2026-10-07) used to fail the
+  // whole Issue. Dropping one check is better than no newsletter.
+  try {
+    const accuracyFlags = await checkSummaryAccuracy(articlesToCheck);
+    flags.push(...accuracyFlags);
+  } catch (err) {
+    console.error(`[reviewer] Summary-accuracy check failed, skipping it: ${(err as Error).message}`);
+  }
 
   try {
     const practiceFlags = await checkPracticeAlignment(articles);

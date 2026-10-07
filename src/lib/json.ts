@@ -1,3 +1,27 @@
+import type Anthropic from "@anthropic-ai/sdk";
+
+// Joins every text block (not just the first - a reply can arrive split
+// across several) and parses it with extractJson. Errors carry the
+// response's stop_reason, so a reply cut off mid-JSON (Reviewer accuracy
+// check, 2026-10-07) shows whether it hit max_tokens, a refusal, or
+// something else - the cron log alone couldn't tell us.
+export function extractJsonFromResponse<T>(response: Anthropic.Message, agentLabel: string): T {
+  const text = response.content
+    .filter((block): block is Anthropic.TextBlock => block.type === "text")
+    .map((block) => block.text)
+    .join("");
+
+  if (!text.trim()) {
+    throw new Error(`${agentLabel} returned no text content to parse (stop_reason: ${response.stop_reason})`);
+  }
+
+  try {
+    return extractJson<T>(text);
+  } catch (err) {
+    throw new Error(`${agentLabel} (stop_reason: ${response.stop_reason}): ${(err as Error).message}`);
+  }
+}
+
 // Models are told to reply with JSON only, but don't always comply exactly -
 // sometimes wrapping it in a ```json fence, sometimes (e.g. explaining why a
 // search failed) prepending a sentence or two of prose before the JSON.

@@ -1,6 +1,6 @@
 import { anthropic } from "../lib/anthropicClient";
 import { AGENT_MODEL } from "../lib/config";
-import { extractJson } from "../lib/json";
+import { extractJsonFromResponse } from "../lib/json";
 import type { ArticleCandidate, NewsletterConfig } from "./types";
 
 const SYSTEM_PROMPT = `You are the Curator agent in an automated AI newsletter pipeline for product managers.
@@ -43,12 +43,7 @@ export async function runCuratorAgent(
     messages: [{ role: "user", content: buildUserPrompt(config, candidates) }],
   });
 
-  const finalText = response.content.find((block) => block.type === "text")?.text;
-  if (!finalText) {
-    throw new Error("Curator agent returned no text content to parse");
-  }
-
-  const indices = extractJson<number[]>(finalText);
+  const indices = extractJsonFromResponse<number[]>(response, "Curator agent");
 
   // Map indices back to the original candidates rather than trusting
   // re-typed JSON from the model (the actual root cause of the missing-URL
