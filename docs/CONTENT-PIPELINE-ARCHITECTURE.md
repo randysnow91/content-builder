@@ -182,7 +182,7 @@ and history.
 
 | Kind | Fields | Renders as |
 |---|---|---|
-| `article_card` | `emoji`, `title`, `source`, `copyright`, `summary`, `pmPerspective`, `url` | The `h3` + **Source** / **Summary** / **Why This Matters** / **Read full article** layout the Skill already produces |
+| `article_card` | `emoji`, `title`, `source`, `copyright`, `summary`, `pmPerspective`, `url` | The `h3` + **Source** / **Summary** / **PM Perspective** / **Read full article** layout the Skill already produces |
 | `text` | `heading?`, `body` (markdown) | A heading + a prose paragraph or two |
 | `closing_thought` | `heading`, `body` | A visually distinct closing block |
 
