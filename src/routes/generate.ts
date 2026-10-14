@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { generateDailyIssue } from "../pipeline/generateDaily";
+import { generateWeeklyIssue } from "../pipeline/generateWeekly";
 import { isValidIssuePayload, type IssuePayload } from "../lib/issue-schema";
 import type { NewsletterConfig } from "../agents/types";
 
@@ -67,25 +68,31 @@ generateRouter.post("/generate", async (req, res) => {
     return;
   }
 
-  if (body.type === "weekly") {
-    // Weekly synthesis is M5 (docs/R2_BUILD-SPEC.md) - not built yet.
-    res.status(501).json({ error: "Not implemented yet — see docs/R2_BUILD-SPEC.md M5" });
+  // Weekly only: the week's sent daily Issues, fetched from EmailServer and
+  // passed in by the Conductor (docs/R2_BUILD-SPEC.md M5). An empty array is
+  // valid - it produces the "quiet week" Issue. Individual malformed entries
+  // are skipped inside generateWeeklyIssue rather than rejected here.
+  if (body.type === "weekly" && !Array.isArray(body.weekContent)) {
+    res.status(400).json({ error: 'body.weekContent must be an array of IssuePayloads for type "weekly"' });
     return;
   }
 
   try {
-    const issue = await generateDailyIssue(newsletterConfig);
+    const issue =
+      body.type === "weekly"
+        ? await generateWeeklyIssue(newsletterConfig, body.weekContent as IssuePayload[])
+        : await generateDailyIssue(newsletterConfig);
 
     if (!isValidIssuePayload(issue)) {
       const reason = describeInvalidIssue(issue as IssuePayload);
-      console.error(`generateDailyIssue produced an invalid IssuePayload (${reason}):`, issue);
+      console.error(`${body.type} generation produced an invalid IssuePayload (${reason}):`, issue);
       res.status(500).json({ error: `Generation produced an invalid Issue payload: ${reason}` });
       return;
     }
 
     res.status(200).json(issue);
   } catch (err) {
-    console.error("Daily generation failed:", err);
+    console.error(`${body.type} generation failed:`, err);
     res.status(500).json({ error: (err as Error).message });
   }
 });

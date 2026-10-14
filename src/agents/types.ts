@@ -23,6 +23,13 @@ export type WrittenArticle = {
   url: string;
 };
 
+// One article from a daily that already went out, carried into the weekly
+// (docs/R2_BUILD-SPEC.md M5) - the daily's article_card plus the date of the
+// daily it appeared in, for the busiest-day count and the day-by-day list.
+export type WeeklyArticle = WrittenArticle & {
+  date: string; // ISO date of the daily it came from
+};
+
 export type ClosingThought = {
   heading: string;
   body: string;

@@ -4,7 +4,9 @@ import { requireConductorSecret } from "./lib/auth";
 import { generateRouter } from "./routes/generate";
 
 const app = express();
-app.use(express.json());
+// Raised from Express's 100kb default: a weekly request carries a whole
+// week of daily Issues in its body (docs/R2_BUILD-SPEC.md M5).
+app.use(express.json({ limit: "2mb" }));
 
 // No auth required — Render health checks and a quick "is it up" from the
 // Conductor (docs/R2_BUILD-SPEC.md §6.1).
