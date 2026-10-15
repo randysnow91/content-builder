@@ -85,10 +85,19 @@ function snapshotBlock(stats: WeeklyStats): Block {
   return { kind: "text", heading: "📊 Weekly Snapshot", body: lines.join("\n") };
 }
 
-// No links here - EmailServer's text blocks render only **bold** and line
-// breaks (its issueRender.ts). The top stories above carry real links as
-// article cards; making this list clickable is a small EmailServer change,
-// noted in docs/R2_BUILD-SPEC.md M5.
+// One "[title](url) (Source)" line, in the markdown-link form EmailServer's
+// text blocks render (its issueRender.ts LINK_PATTERN, added 2026-10-14).
+// That pattern can't hold a "]" in the title or a "(", ")" or space in the
+// URL, so those are neutralized here: brackets in the title become
+// parentheses, and the URL characters are percent-encoded (the same address
+// to a browser). A non-http(s) URL is shown as plain text, never a link.
+export function articleListLine(article: Pick<WeeklyArticle, "title" | "url" | "source">): string {
+  if (!/^https?:\/\//i.test(article.url)) return `• ${article.title} (${article.source})`;
+  const title = article.title.replace(/\[/g, "(").replace(/\]/g, ")").replace(/\n/g, " ");
+  const url = article.url.replace(/\(/g, "%28").replace(/\)/g, "%29").replace(/\s/g, "%20");
+  return `• [${title}](${url}) (${article.source})`;
+}
+
 function dayByDayBlock(articles: WeeklyArticle[]): Block {
   const sections: string[] = [];
   let currentDate = "";
@@ -97,7 +106,7 @@ function dayByDayBlock(articles: WeeklyArticle[]): Block {
       currentDate = article.date;
       sections.push(`${sections.length > 0 ? "\n" : ""}**${formatDay(article.date)}**`);
     }
-    sections.push(`• ${article.title} (${article.source})`);
+    sections.push(articleListLine(article));
   }
   return { kind: "text", heading: "📅 Articles by Day", body: sections.join("\n") };
 }
