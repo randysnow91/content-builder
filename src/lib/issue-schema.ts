@@ -5,15 +5,28 @@
 // sync by hand until/unless that gets annoying enough to publish as a
 // package or serve from an endpoint).
 //
+// KEEP IDENTICAL: EmailServer and Content Builder each hold a copy of this
+// file, and the two must stay byte-for-byte the same - change one, copy it
+// to the other in the same sitting. (Conductor only passes Issues through
+// and holds no copy.)
+//
 // This is the *wire* shape - what Content Builder produces and what
-// EmailServer's future ingestion endpoint (§4.2) accepts. Deliberately
+// EmailServer's ingestion endpoint (POST /api/issues) accepts. Deliberately
 // separate from EmailServer's internal Issue database record, which adds
 // fields Content Builder never needs to know about (id, status,
 // send_after, which newsletter).
 //
-// No validation library - hand-rolled, matching this project's existing
-// style (see isValidEmail in src/lib/validation.ts): a plain type-guard
-// function a caller can gate on, no new dependency.
+// No validation library - hand-rolled, a plain type-guard function a caller
+// can gate on, no new dependency.
+//
+// Sync history:
+// - 2026-09-28: reviewerFlags (Content Builder M2/M3 - link validity,
+//   summary accuracy, and the RAG-grounded practice-alignment check).
+// - 2026-10-15: "dropped_article", added by Content Builder on 2026-10-05
+//   but never copied to EmailServer, whose validator therefore rejected the
+//   *whole* Issue (400) on any day an article was dropped. Found in a
+//   cross-repo check before launch; both copies made identical, and the
+//   flag types made one array feeding both the type and the validator.
 
 export type ArticleCardBlock = {
   kind: "article_card";
@@ -42,20 +55,23 @@ export type Block = ArticleCardBlock | TextBlock | ClosingThoughtBlock;
 
 export type IssueType = "daily" | "weekly";
 
-// The Reviewer's findings (architecture doc §11.1, §11.5; R2_BUILD-SPEC.md
-// M2/M3). "broken_link" and "inaccurate_summary" are the two mechanical
-// checks built in M2; "practice_alignment" is M3's RAG-grounded check -
-// does the PM Perspective align with the pm_practices corpus? "dropped_article"
-// isn't a Reviewer check at all - it's raised by the orchestrator
-// (generateDaily.ts) when Curator/Writer's per-article output couldn't be
-// matched back to a real candidate (missing-URL handoff, 2026-10-04) - reused
-// here since reviewerFlags is already the one mechanism that surfaces an
-// issue to the operator and blocks auto-send (architecture doc §11.5).
-// Findings annotate - they never block generation or auto-fix anything.
-// EmailServer's own copy of this file doesn't have this field yet (noted as
-// a to-do there; see R2_BUILD-SPEC.md §10) since it has no consumer for it
-// until its own M1 ships the ingestion endpoint.
-export type ReviewerFlagType = "broken_link" | "inaccurate_summary" | "practice_alignment" | "dropped_article";
+// The Reviewer's findings (architecture doc §11.1, §11.5). "broken_link" and
+// "inaccurate_summary" are the two mechanical checks; "practice_alignment"
+// is the RAG-grounded one. "dropped_article" isn't a Reviewer check - Content
+// Builder's orchestrator raises it when an article from Curator/Writer
+// couldn't be matched back to a real candidate and was left out - but it
+// rides the same mechanism, since that's what surfaces a problem to the
+// operator and blocks auto-send. Findings annotate - they never block
+// generation, but a non-empty list here keeps this Issue from getting a
+// send_after (see the ingestion route).
+export const REVIEWER_FLAG_TYPES = [
+  "broken_link",
+  "inaccurate_summary",
+  "practice_alignment",
+  "dropped_article",
+] as const;
+
+export type ReviewerFlagType = (typeof REVIEWER_FLAG_TYPES)[number];
 
 export type ReviewerFlag = {
   type: ReviewerFlagType;
@@ -70,8 +86,9 @@ export type IssuePayload = {
   // Escape hatch (§6.3): finished HTML that bypasses block rendering
   // entirely. Rare - only for a deliberate one-off experiment.
   rawHtml?: string;
-  // Optional so payloads from before M2 (or a rawHtml-only payload) remain
-  // valid. Always present (even as []) on a real M2+ daily/weekly generation.
+  // Optional so payloads from before Content Builder's M2 (or a
+  // rawHtml-only payload) remain valid. Always present (even as []) on a
+  // real M2+ daily/weekly generation.
   reviewerFlags?: ReviewerFlag[];
 };
 
@@ -106,9 +123,8 @@ function isValidReviewerFlag(value: unknown): value is ReviewerFlag {
   if (typeof value !== "object" || value === null) return false;
   const flag = value as Record<string, unknown>;
 
-  const validTypes: ReviewerFlagType[] = ["broken_link", "inaccurate_summary", "practice_alignment", "dropped_article"];
   return (
-    validTypes.includes(flag.type as ReviewerFlagType) &&
+    REVIEWER_FLAG_TYPES.includes(flag.type as ReviewerFlagType) &&
     isNonEmptyString(flag.articleUrl) &&
     isNonEmptyString(flag.message)
   );

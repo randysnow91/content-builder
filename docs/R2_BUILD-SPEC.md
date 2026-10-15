@@ -1,6 +1,6 @@
 # Claude Code Build Spec — Content Builder (R2)
 
-**Status:** v1.8 — M0, M1, M2, M3, and M5 complete (2026-10-15). M4 still ahead.
+**Status:** v1.9 — M0–M5 complete (2026-10-15). M4's one remaining check (both links on a real sent email) ticks after launch on 2026-10-19.
 **Derived from:** `CONTENT-PIPELINE-ARCHITECTURE.md` (the cross-repo design —
 read it first, especially §6, §11) + planning discussion (2026-09-15).
 **Scope:** Content Builder's own R2 work only. EmailServer and Conductor each
@@ -20,6 +20,7 @@ note below).
 | v1.6 | 2026-09-28 | Content Builder deployed to Render for the first time (architecture doc §13 called for this; it hadn't actually happened yet - only planned). A real production test surfaced a second real M3 bug, the same class as M2's Curator/Writer issue: the practice check's `max_tokens: 2048` was enough for the 2-article local tests but too small once a real 5-article production run gave the model a genuinely large batch (each article's PM Perspective plus up to 4 retrieved practices) to judge - the model ran out of budget before emitting any text block, caught as "returned no text content to parse" rather than crashing the request (the try/catch added specifically for this check did its job). Raised to `4096`, matching Curator's own fix, and added `stop_reason` to the error message so a repeat wouldn't require re-deriving the cause from scratch. Reproduced the failure locally at the original 5-article scale before the fix, then confirmed it succeeds cleanly after - not just assumed fixed. |
 | v1.7 | 2026-10-05 | Retroactive M1 fix: a Conductor session's real daily runs were 500ing on `"Generation produced an invalid Issue payload"` - every `article_card` had `url: undefined`. Root cause, precisely diagnosed in a handoff doc before this session even started (`WorkingNotes/HANDOFF-2026-10-04-missing-urls.md`): Curator and Writer each asked the model to re-type `title`/`source`/`url` through their own JSON output rather than the orchestrator carrying forward data it already had, and the url silently didn't survive one of those round-trips on some runs. Fixed by removing the opportunity, not improving the prompt: Curator now returns only the ranked indices of candidates it's keeping; Writer returns only `{index, emoji, summary, pmPerspective}` per article; the orchestrator merges `title`/`source`/`url` back in from the original candidate in both cases, so those fields never pass through the model at all anymore. A curated article Writer can't produce valid content for is dropped (not silently - a new `dropped_article` reviewer flag) rather than failing the whole Issue. Reviewer also now filters out any article with no usable URL as a backstop, and `routes/generate.ts` names the specific failing field on a 500 instead of a generic message. Verified directly (5 synthetic candidates, exact title/source/url matches through both stages) and live (5 real articles, zero missing URLs, no crash). User explicitly deferred the related zero-article auto-send issue from the same handoff - out of scope until EmailServer's auto-send cron ships. |
 | v1.8 | 2026-10-15 | M5 built (2026-10-14) and verified live (2026-10-15): weekly synthesis (`type: "weekly"`), done out of order ahead of M4 at the user's choice. Format decided as **hybrid** (architecture doc §15 decision 6 left it open), modeled on the user's earlier `ai-news-digest-weekly-summary` Skill: snapshot numbers, 3-5 top stories as article cards, themes, PM takeaways, a day-by-day list, a closing thought. One new agent, the **Weekly Editor** (`src/agents/weeklyEditor.ts`) - not the daily's four-agent pipeline, since the week's articles were already researched, curated, written and reviewed in their dailies. Two design choices worth naming: the numbers are computed in code, not by the model (counting is code's job; judgment is the model's), and the model picks top stories/themes by index, so every link comes from the dailies - the same lesson as the 2026-10-04 missing-URL fix. Verified locally against the real sent dailies from EmailServer (Oct 8-10, 18 articles): six real runs, all 200 in 13-29s, every top-story link real, plus empty-week, missing-input, malformed-entry and duplicate-article checks, and a preview rendered through EmailServer's own `issueRender.ts`. One prompt fix from reading real output: the dailies repeat the same story on different days, so the Weekly Editor is told to pick one article per story. Deploy was delayed a day by a Render platform outage (deploys paused for free services). Meanwhile EmailServer added `[title](url)` links to text blocks (its `ee3d746`), so the day-by-day list now links every article (`articleListLine` in `generateWeekly.ts`, which neutralizes `]` in titles and `(`/`)`/spaces in URLs so they can't break EmailServer's link pattern; non-http(s) URLs stay plain text). Verified live by the user's own Conductor run on 2026-10-15: a weekly built from that week's 25 real articles, stored by EmailServer as a draft with no `send_after`, all six sections present, 25 of 25 day-by-day links. |
+| v1.9 | 2026-10-15 | Cross-repo sync before launch. **M4 built on the EmailServer side** (its M3, commit `f483214`): every article card reads "Read full article · Disagree with this take?", a `mailto:` to `pmfeedback@randy-snow.com` (EmailServer's `FEEDBACK_EMAIL`), pre-filled with the title, issue date and link below a "please write above this line" divider; plus a plain-text fallback address for devices with no mail app. Decided with the operator to keep feedback human-filtered for launch - hand-added to the corpus as `source: 'feedback'` - rather than auto-fed to the Reviewer (knowledge-base-poisoning risk; see EmailServer's spec M3). **Contract drift found and fixed:** EmailServer's `issue-schema.ts` never got `dropped_article` (v1.7), so its validator 400'd the whole Issue on any day an article was dropped; both copies are now byte-identical, with a KEEP IDENTICAL header. Two M1/M2 end-to-end checks that waited on EmailServer's M1 ticked - verified in real use since. |
 
 > **How to use this document.** The architecture doc says *what* and *why*,
 > across all three services. This spec says *how, with what, and in what
@@ -292,10 +293,11 @@ web search — no Reviewer yet (architecture doc §18, stage 1).
       `[pipeline]` console logs showing each agent's input/output count
       (e.g. "Research found 3 candidate(s)" → "Curator kept 2 of 3" →
       "Writer produced 2 article(s)").
-- [ ] *(Full end-to-end, once EmailServer's M1 exists — not required to pass
+- [x] *(Full end-to-end, once EmailServer's M1 exists — not required to pass
       this milestone on its own)*: manually posting the response to
       EmailServer's `POST /api/issues` produces a real, reviewable draft
-      Issue.
+      Issue. Verified 2026-09-29 (EmailServer spec v1.1), and daily since
+      via the Conductor.
 
 **Retroactive fix (2026-10-05) — missing article URLs, found via Conductor:**
 A fresh Conductor session hit real daily-run failures (`POST /generate`
@@ -387,8 +389,10 @@ own possibly-flawed notes).
 - [x] A clean generation produces no flags — verified at the Reviewer level
       directly, and in live runs where real, accurate articles were
       consistently left unflagged alongside the genuinely bad ones.
-- [ ] *(Once EmailServer's ingestion accepts `reviewerFlags` — not required
+- [x] *(Once EmailServer's ingestion accepts `reviewerFlags` — not required
       here)*: a flagged Issue posted to EmailServer gets `send_after = NULL`.
+      Verified in EmailServer's M1. (EmailServer only accepted
+      `dropped_article` from 2026-10-15 — see v1.9.)
 
 **This milestone was called "done" prematurely on 2026-09-18, then reopened
 the same day** after a fresh test hung past 1123 seconds — nearly 19
@@ -565,7 +569,7 @@ in the response.
 
 ---
 
-### M4: Feedback Loop (Capture Only)
+### M4: Feedback Loop (Capture Only) — ✅ built (2026-10-15)
 
 **Goals:** Each article card carries a "Disagree with this take?" `mailto:`
 link — capture only, no corpus integration yet (architecture doc §18, stage
@@ -585,12 +589,23 @@ feedback-loop feature.
 3. No new page, table, or endpoint — replies land in the operator's own
    inbox.
 
+**As built** (EmailServer's M3 — details there): the address is a
+dedicated `pmfeedback@randy-snow.com` (EmailServer's `FEEDBACK_EMAIL`)
+rather than the operator's own, since it's shown to every subscriber.
+Feedback is human-filtered for launch: good replies get hand-added to the
+practice corpus as `source: 'feedback'` (already reserved by
+`seedPracticeCorpus.ts`). Feeding it to the Reviewer automatically was
+considered and rejected for now — anyone holding the email could write into
+what the Reviewer is grounded on. **Nothing changed in this repo.**
+
 **Acceptance Criteria:**
-- [ ] Every sent daily/weekly email's article cards show both links.
-- [ ] Clicking "Disagree with this take?" opens a pre-filled email to the
-      operator's address with the article's title and issue date already
-      in the subject/body.
-- [ ] No new EmailServer table or route was added for this milestone.
+- [ ] Every sent daily/weekly email's article cards show both links —
+      seen in the admin preview and a test-send; ticks after the first real
+      sends at launch (2026-10-19).
+- [x] Clicking "Disagree with this take?" opens a pre-filled email to the
+      feedback address with the article's title and issue date already
+      in the subject/body. Verified 2026-10-15 on iPhone Mail.
+- [x] No new EmailServer table or route was added for this milestone.
 
 ---
 
@@ -698,6 +713,6 @@ Same boundaries as the architecture doc §14, plus:
 
 ---
 
-*End of Build Spec v1.8 — M0, M1, M2, M3, and M5 complete, deployed to
-Render, and verified end-to-end through a real Conductor run. M4 (the
-feedback link, mostly an EmailServer change) still ahead.*
+*End of Build Spec v1.9 — M0–M5 complete, deployed to Render, and verified
+end-to-end through a real Conductor run. M4 was built on the EmailServer
+side; its last check ticks after launch.*
