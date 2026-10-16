@@ -1,25 +1,47 @@
 import { anthropic } from "../lib/anthropicClient";
 import { AGENT_MODEL } from "../lib/config";
 import { extractJsonFromResponse } from "../lib/json";
-import type { ArticleCandidate, NewsletterConfig } from "./types";
+import type { ArticleCandidate, NewsletterConfig, WeeklyArticle } from "./types";
 
 const SYSTEM_PROMPT = `You are the Curator agent in an automated AI newsletter pipeline for product managers.
 You do not search the web - you only judge candidates you're given. Filter for genuine relevance, remove duplicates, and rank by importance to a PM audience.`;
 
-function buildUserPrompt(config: NewsletterConfig, candidates: ArticleCandidate[]): string {
+// What already went out recently, for spotting the same story told by a
+// different outlet (an exact repeat of a link is already removed in code,
+// generateDaily.ts). Title and summary are enough to recognize a story; the
+// PM Perspective and URL would only be noise here.
+function recentSection(recent: WeeklyArticle[]): string {
+  if (recent.length === 0) return "";
+  const listed = recent.map((a) => ({ date: a.date, title: a.title, source: a.source, summary: a.summary }));
+  return `
+These stories already went out in this newsletter's recent emails, as JSON:
+${JSON.stringify(listed, null, 2)}
+`;
+}
+
+function buildUserPrompt(config: NewsletterConfig, candidates: ArticleCandidate[], recent: WeeklyArticle[]): string {
   const indexed = candidates.map((c, index) => ({ index, ...c }));
+
+  const steps = [
+    "Remove anything that isn't genuinely relevant to a product manager (not just AI-adjacent - it should matter for someone building or managing a product).",
+    "Remove duplicates - if two candidates cover the same story, keep only the stronger one.",
+    ...(recent.length > 0
+      ? [
+          "Remove any candidate about a story that already went out (listed above), even from a different outlet, with a different headline, or leading with a different detail or angle - readers have already seen it. Keep it only if it reports a separate, later event (e.g. a launch that was only announced is now actually available, a deal closed, a ruling came down). New details, analysis, reactions, or a wider rollout of the same release don't count. When unsure, leave it out.",
+        ]
+      : []),
+    "Rank the survivors most-important-first. The first article should be the most interesting and attention-grabbing.",
+    "Keep the best 3 to 7. Fewer than 3 is fine if that's all that qualifies.",
+  ];
 
   return `Newsletter topics: ${config.topics}
 Newsletter voice: ${config.voice}
-
+${recentSection(recent)}
 Here are today's candidate articles as JSON, each with its index in this list:
 ${JSON.stringify(indexed, null, 2)}
 
 From these:
-1. Remove anything that isn't genuinely relevant to a product manager (not just AI-adjacent - it should matter for someone building or managing a product).
-2. Remove duplicates - if two candidates cover the same story, keep only the stronger one.
-3. Rank the survivors most-important-first. The first article should be the most interesting and attention-grabbing.
-4. Keep the best 3 to 7. Fewer than 3 is fine if that's all that qualifies.
+${steps.map((step, i) => `${i + 1}. ${step}`).join("\n")}
 
 Reply with ONLY a JSON array of the "index" values (not the full objects) of the candidates you're keeping, ordered most-important-first - e.g. [2, 0, 4]. Don't retype title/source/url/snippet; just reference them by index.
 
@@ -28,7 +50,8 @@ If nothing qualifies, reply with an empty array: []`;
 
 export async function runCuratorAgent(
   config: NewsletterConfig,
-  candidates: ArticleCandidate[]
+  candidates: ArticleCandidate[],
+  recent: WeeklyArticle[] = []
 ): Promise<ArticleCandidate[]> {
   if (candidates.length === 0) {
     return [];
@@ -36,11 +59,13 @@ export async function runCuratorAgent(
 
   const response = await anthropic.messages.create({
     model: AGENT_MODEL,
-    // A list of indices is tiny compared to re-typed article objects - no
-    // realistic truncation risk, but kept well above what's needed anyway.
-    max_tokens: 1024,
+    // The reply itself is tiny (a list of indices), but the model thinks
+    // first, and that counts too: ~750-800 tokens once it's also comparing
+    // against the recent stories, and one replay run hit the old 1024 limit
+    // with no answer at all (2026-10-16). Same headroom as the Reviewer.
+    max_tokens: 4096,
     system: SYSTEM_PROMPT,
-    messages: [{ role: "user", content: buildUserPrompt(config, candidates) }],
+    messages: [{ role: "user", content: buildUserPrompt(config, candidates, recent) }],
   });
 
   const indices = extractJsonFromResponse<number[]>(response, "Curator agent");

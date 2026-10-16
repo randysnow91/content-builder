@@ -1,6 +1,7 @@
 import { runWeeklyEditorAgent, type WeeklyEditorOutput } from "../agents/weeklyEditor";
 import type { NewsletterConfig, WeeklyArticle } from "../agents/types";
 import type { Block, IssuePayload } from "../lib/issue-schema";
+import { collectSentArticles } from "./sentArticles";
 
 function todayIsoDate(): string {
   return new Date().toISOString().slice(0, 10);
@@ -12,35 +13,6 @@ function formatDay(isoDate: string): string {
   const date = new Date(`${isoDate}T00:00:00Z`);
   if (Number.isNaN(date.getTime())) return isoDate;
   return date.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", timeZone: "UTC" });
-}
-
-// Pulls every article_card out of the week's sent dailies, in date order.
-// Pure, so it can be checked directly against hand-made input. A malformed
-// entry is skipped rather than rejecting the whole week, and an article that
-// went out twice (same URL) is only counted once.
-export function collectWeeklyArticles(weekContent: IssuePayload[]): WeeklyArticle[] {
-  const byDate = [...weekContent]
-    .filter((issue) => typeof issue?.date === "string" && Array.isArray(issue.blocks))
-    .sort((a, b) => a.date.localeCompare(b.date));
-
-  const seenUrls = new Set<string>();
-  const articles: WeeklyArticle[] = [];
-  for (const issue of byDate) {
-    for (const block of issue.blocks) {
-      if (block?.kind !== "article_card" || !block.url || seenUrls.has(block.url)) continue;
-      seenUrls.add(block.url);
-      articles.push({
-        date: issue.date,
-        emoji: block.emoji,
-        title: block.title,
-        source: block.source,
-        summary: block.summary,
-        pmPerspective: block.pmPerspective,
-        url: block.url,
-      });
-    }
-  }
-  return articles;
 }
 
 export type WeeklyStats = {
@@ -198,7 +170,7 @@ export async function generateWeeklyIssue(
   config: NewsletterConfig,
   weekContent: IssuePayload[]
 ): Promise<IssuePayload> {
-  const articles = collectWeeklyArticles(weekContent);
+  const articles = collectSentArticles(weekContent);
   console.log(`[pipeline] Weekly: ${articles.length} article(s) from ${weekContent.length} daily issue(s)`);
 
   let edited: WeeklyEditorOutput | null = null;

@@ -4,6 +4,7 @@ import { runReviewerAgent } from "../agents/reviewer";
 import { runWriterAgent } from "../agents/writer";
 import type { ArticleCandidate, NewsletterConfig, WriterOutput } from "../agents/types";
 import type { Block, IssuePayload, ReviewerFlag } from "../lib/issue-schema";
+import { collectSentArticles, normalizeUrl } from "./sentArticles";
 
 function todayIsoDate(): string {
   return new Date().toISOString().slice(0, 10);
@@ -58,10 +59,30 @@ export function buildDailyBlocks(written: WriterOutput): Block[] {
   return blocks;
 }
 
+// Drops any candidate whose link already went out in a recent email. Done in
+// code, before the Curator, so an exact repeat can never get through - not
+// even on the Curator-failed fallback path below. A repeat under a different
+// link (the same story from another outlet) is the Curator's job instead.
+// Pure, so it can be checked directly.
+export function removeAlreadySent(candidates: ArticleCandidate[], sentUrls: Set<string>): ArticleCandidate[] {
+  return candidates.filter((c) => !sentUrls.has(normalizeUrl(c.url)));
+}
+
 // Wires Research -> Curator -> Writer -> Reviewer into one daily IssuePayload
 // (docs/R2_BUILD-SPEC.md M1-M2). Each agent is its own, separate API call -
 // this function does no LLM calls of its own, just plain orchestration.
-export async function generateDailyIssue(config: NewsletterConfig): Promise<IssuePayload> {
+// `recentContent` is the newsletter's recent sent dailies, passed in by the
+// Conductor, so today's email doesn't repeat a story readers already got
+// (found in real data, 2026-10-15). Empty means no check - the same output
+// as before this existed.
+export async function generateDailyIssue(
+  config: NewsletterConfig,
+  recentContent: IssuePayload[] = []
+): Promise<IssuePayload> {
+  const recent = collectSentArticles(recentContent);
+  const sentUrls = new Set(recent.map((a) => normalizeUrl(a.url)));
+  console.log(`[pipeline] Daily: ${recent.length} recently sent article(s) to avoid repeating`);
+
   // "Always return something, never just error out" (decided 2026-09-18):
   // a Research failure - the 8-minute timeout, a parsing error, anything -
   // degrades to the same "no articles found" path already built and
@@ -71,6 +92,11 @@ export async function generateDailyIssue(config: NewsletterConfig): Promise<Issu
   try {
     candidates = await timed("Research", () => runResearchAgent(config));
     console.log(`[pipeline] Research found ${candidates.length} candidate(s)`);
+    const fresh = removeAlreadySent(candidates, sentUrls);
+    if (fresh.length < candidates.length) {
+      console.log(`[pipeline] Removed ${candidates.length - fresh.length} candidate(s) already sent recently`);
+    }
+    candidates = fresh;
   } catch (err) {
     console.error(`[pipeline] Research failed, falling back to zero candidates: ${(err as Error).message}`);
     candidates = [];
@@ -84,7 +110,7 @@ export async function generateDailyIssue(config: NewsletterConfig): Promise<Issu
   // curated one, but a far better outcome than an error.
   let curated: ArticleCandidate[];
   try {
-    curated = await timed("Curator", () => runCuratorAgent(config, candidates));
+    curated = await timed("Curator", () => runCuratorAgent(config, candidates, recent));
     console.log(`[pipeline] Curator kept ${curated.length} of ${candidates.length} candidate(s)`);
   } catch (err) {
     console.error(`[pipeline] Curator failed, falling back to uncurated candidates: ${(err as Error).message}`);

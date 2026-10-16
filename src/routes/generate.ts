@@ -77,11 +77,20 @@ generateRouter.post("/generate", async (req, res) => {
     return;
   }
 
+  // Daily only, optional: the newsletter's recent sent dailies, passed in by
+  // the Conductor so today's email doesn't repeat a story (same shape as
+  // weekContent). Optional so a Conductor that doesn't send it yet still
+  // works exactly as before.
+  if (body.type === "daily" && body.recentContent !== undefined && !Array.isArray(body.recentContent)) {
+    res.status(400).json({ error: 'body.recentContent, if given, must be an array of IssuePayloads for type "daily"' });
+    return;
+  }
+
   try {
     const issue =
       body.type === "weekly"
         ? await generateWeeklyIssue(newsletterConfig, body.weekContent as IssuePayload[])
-        : await generateDailyIssue(newsletterConfig);
+        : await generateDailyIssue(newsletterConfig, (body.recentContent as IssuePayload[] | undefined) ?? []);
 
     if (!isValidIssuePayload(issue)) {
       const reason = describeInvalidIssue(issue as IssuePayload);
