@@ -1,6 +1,6 @@
 # Claude Code Build Spec — Content Builder (R2)
 
-**Status:** v1.9 — M0–M5 complete (2026-10-15). M4's one remaining check (both links on a real sent email) ticks after launch on 2026-10-19.
+**Status:** v1.10 — M0–M5 complete (2026-10-15). Repeat-story fix built and pushed (2026-10-16), awaiting its first live daily run. M4's one remaining check (both links on a real sent email) ticks after launch on 2026-10-19.
 **Derived from:** `CONTENT-PIPELINE-ARCHITECTURE.md` (the cross-repo design —
 read it first, especially §6, §11) + planning discussion (2026-09-15).
 **Scope:** Content Builder's own R2 work only. EmailServer and Conductor each
@@ -21,6 +21,7 @@ note below).
 | v1.7 | 2026-10-05 | Retroactive M1 fix: a Conductor session's real daily runs were 500ing on `"Generation produced an invalid Issue payload"` - every `article_card` had `url: undefined`. Root cause, precisely diagnosed in a handoff doc before this session even started (`WorkingNotes/HANDOFF-2026-10-04-missing-urls.md`): Curator and Writer each asked the model to re-type `title`/`source`/`url` through their own JSON output rather than the orchestrator carrying forward data it already had, and the url silently didn't survive one of those round-trips on some runs. Fixed by removing the opportunity, not improving the prompt: Curator now returns only the ranked indices of candidates it's keeping; Writer returns only `{index, emoji, summary, pmPerspective}` per article; the orchestrator merges `title`/`source`/`url` back in from the original candidate in both cases, so those fields never pass through the model at all anymore. A curated article Writer can't produce valid content for is dropped (not silently - a new `dropped_article` reviewer flag) rather than failing the whole Issue. Reviewer also now filters out any article with no usable URL as a backstop, and `routes/generate.ts` names the specific failing field on a 500 instead of a generic message. Verified directly (5 synthetic candidates, exact title/source/url matches through both stages) and live (5 real articles, zero missing URLs, no crash). User explicitly deferred the related zero-article auto-send issue from the same handoff - out of scope until EmailServer's auto-send cron ships. |
 | v1.8 | 2026-10-15 | M5 built (2026-10-14) and verified live (2026-10-15): weekly synthesis (`type: "weekly"`), done out of order ahead of M4 at the user's choice. Format decided as **hybrid** (architecture doc §15 decision 6 left it open), modeled on the user's earlier `ai-news-digest-weekly-summary` Skill: snapshot numbers, 3-5 top stories as article cards, themes, PM takeaways, a day-by-day list, a closing thought. One new agent, the **Weekly Editor** (`src/agents/weeklyEditor.ts`) - not the daily's four-agent pipeline, since the week's articles were already researched, curated, written and reviewed in their dailies. Two design choices worth naming: the numbers are computed in code, not by the model (counting is code's job; judgment is the model's), and the model picks top stories/themes by index, so every link comes from the dailies - the same lesson as the 2026-10-04 missing-URL fix. Verified locally against the real sent dailies from EmailServer (Oct 8-10, 18 articles): six real runs, all 200 in 13-29s, every top-story link real, plus empty-week, missing-input, malformed-entry and duplicate-article checks, and a preview rendered through EmailServer's own `issueRender.ts`. One prompt fix from reading real output: the dailies repeat the same story on different days, so the Weekly Editor is told to pick one article per story. Deploy was delayed a day by a Render platform outage (deploys paused for free services). Meanwhile EmailServer added `[title](url)` links to text blocks (its `ee3d746`), so the day-by-day list now links every article (`articleListLine` in `generateWeekly.ts`, which neutralizes `]` in titles and `(`/`)`/spaces in URLs so they can't break EmailServer's link pattern; non-http(s) URLs stay plain text). Verified live by the user's own Conductor run on 2026-10-15: a weekly built from that week's 25 real articles, stored by EmailServer as a draft with no `send_after`, all six sections present, 25 of 25 day-by-day links. |
 | v1.9 | 2026-10-15 | Cross-repo sync before launch. **M4 built on the EmailServer side** (its M3, commit `f483214`): every article card reads "Read full article · Disagree with this take?", a `mailto:` to `pmfeedback@randy-snow.com` (EmailServer's `FEEDBACK_EMAIL`), pre-filled with the title, issue date and link below a "please write above this line" divider; plus a plain-text fallback address for devices with no mail app. Decided with the operator to keep feedback human-filtered for launch - hand-added to the corpus as `source: 'feedback'` - rather than auto-fed to the Reviewer (knowledge-base-poisoning risk; see EmailServer's spec M3). **Contract drift found and fixed:** EmailServer's `issue-schema.ts` never got `dropped_article` (v1.7), so its validator 400'd the whole Issue on any day an article was dropped; both copies are now byte-identical, with a KEEP IDENTICAL header. Two M1/M2 end-to-end checks that waited on EmailServer's M1 ticked - verified in real use since. |
+| v1.10 | 2026-10-16 | **Dailies no longer repeat stories** (the §10 follow-up found in M5's real data). `POST /generate { type: "daily" }` takes an optional `recentContent` (the newsletter's sent dailies from the last 7 days, sent by the Conductor - its `ebdc840`). Two layers: an exact repeat of a link is removed **in code** before the Curator (`removeAlreadySent`, comparing links with `normalizeUrl`, which ignores http/https, `www.`, trailing slash, `#fragment` and tracking parameters), and the Curator is shown the recent titles/summaries and drops the same story from another outlet unless it's a separate, later event ("when unsure, leave it out"). `collectWeeklyArticles` moved to `src/pipeline/sentArticles.ts` as `collectSentArticles`, shared by daily and weekly. Real data showed two exact-link repeats had already gone out to subscribers (Microsoft/Copilot Oct 15, Gemini Argon Oct 16). Tested: plain-code checks; 12 Curator replays of real days (Oct 10/15/16 plus a fresh run) catching every known repeat; one full local `/generate` (200, ~3 min) that exposed a miss (Meta's open-weight model, a new angle on a story already sent), fixed by tightening the prompt (then caught 3/3). Also found: the Curator's thinking hit the old `max_tokens: 1024` with no answer once it had recent stories to compare (seen up to ~1,600) - raised to 4096. Commit `48847ee`. **Not yet verified live** - see §10. |
 
 > **How to use this document.** The architecture doc says *what* and *why*,
 > across all three services. This spec says *how, with what, and in what
@@ -192,14 +193,19 @@ CREATE TABLE pm_practices (
   up" from the Conductor. *(Built, M0.)*
 
 **POST /generate** *(gated by `CONDUCTOR_ACCESS_SECRET`, §4.1)*
-- Body: `{ type: "daily" | "weekly", newsletterConfig: { topics, voice }, weekContent?: IssuePayload[] }`
+- Body: `{ type: "daily" | "weekly", newsletterConfig: { topics, voice }, weekContent?: IssuePayload[], recentContent?: IssuePayload[] }`
   (`weekContent` present only for `type: "weekly"` — the week's sent daily
-  Issues, per architecture doc §8 and §15 decision 2)
+  Issues, per architecture doc §8 and §15 decision 2; `recentContent`
+  optional for `type: "daily"` — the last 7 days' sent dailies, so the daily
+  doesn't repeat a story, v1.10)
 - Returns: an `IssuePayload` (`issue-schema.ts`) — `{ type, date, blocks }`
   or `{ type, date, rawHtml }`
 - Implementation (daily): runs Research → Curator → Writer → (Reviewer, from
   M2) in sequence; a broken/empty generation still returns a *valid* payload
-  (e.g. one `text` block explaining nothing was found), never an opaque 500
+  (e.g. one `text` block explaining nothing was found), never an opaque 500.
+  If `recentContent` is given it must be an array (`400` otherwise); links
+  already sent are removed before the Curator, and the Curator is told to
+  skip stories already covered. Missing = no repeat check, same as before.
 - Implementation (weekly, M5): `weekContent` is **required** and must be an
   array (`400` otherwise); `[]` is valid and returns a "quiet week" Issue.
   Each entry needs `date` (ISO) and `blocks` - only its `article_card`
@@ -683,12 +689,14 @@ Same boundaries as the architecture doc §14, plus:
 - **Weekly format** stays flexible on purpose (architecture doc §15,
   decision 6). M5 started with **hybrid** (2026-10-14); changing it is a
   `weeklyEditor.ts` prompt / `buildWeeklyBlocks` change only.
-- **The dailies repeat stories across days** (seen in real data: the same
+- **The dailies repeated stories across days** (seen in real data: the same
   ChatGPT interface launch went out Oct 8 via TechCrunch and Oct 10 via
-  MacRumors). Each daily's Research/Curator only sees that day's search, not
-  what already went out. The weekly works around it (one article per story
-  in its top stories), but the dailies themselves would need the recent
-  sent articles passed in to avoid it.
+  MacRumors). **Fixed in v1.10 (2026-10-16), awaiting live check:** after
+  the next real daily run, Render's logs should show `Daily: N recently
+  sent article(s) to avoid repeating` with N around 25-30 (0 means the
+  Conductor isn't sending `recentContent`), and the email shouldn't repeat
+  a story from the past week. Then mark this verified. The weekly still
+  keeps its own one-article-per-story rule.
 - **The agents hardcode "AI news" as the subject**, not just as a default —
   `topics`/`voice` steer within that premise, they don't redefine it (raised
   2026-09-16 while discussing a hypothetical second, non-AI newsletter, e.g.
@@ -713,6 +721,6 @@ Same boundaries as the architecture doc §14, plus:
 
 ---
 
-*End of Build Spec v1.9 — M0–M5 complete, deployed to Render, and verified
+*End of Build Spec v1.10 — M0–M5 complete, deployed to Render, and verified
 end-to-end through a real Conductor run. M4 was built on the EmailServer
 side; its last check ticks after launch.*
